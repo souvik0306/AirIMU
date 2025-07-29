@@ -16,7 +16,7 @@ class Sequence(ABC):
         cls.subclasses[cls.__name__] = cls
 
 class SeqDataset(Data.Dataset):
-    def __init__(self, root, dataname, devive = 'cpu', name='Nav', duration=200, step_size=200, mode='inference', 
+    def __init__(self, root, dataname, device = 'cpu', name='Nav', duration=200, step_size=200, mode='inference', 
                     drop_last = True, conf = {}):
         super().__init__()
 
@@ -112,7 +112,7 @@ class SeqeuncesDataset(Data.Dataset):
         self.uni = torch.distributions.uniform.Uniform(-torch.ones(1), torch.ones(1))
         self.device = device
         self.conf = data_set_config
-        self.gravity = conf.gravity if "gravity" in conf.keys() else 9.81007
+        self.gravity = data_set_config.gravity if "gravity" in data_set_config.keys() else 9.81007
         if mode is None:
             self.mode = data_set_config.mode
         else:
