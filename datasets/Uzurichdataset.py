@@ -76,13 +76,33 @@ class Uzurich(Sequence):
         self.data["acc"] = torch.tensor(self.data["acc"])
 
         # apply alternative orientation if requested
-        self.set_orientation(rot_path, data_name, rot_type)
+        if rot_type is not None and rot_type != "None" and rot_type.lower() != "gtrot":
+            with open(rot_path, 'rb') as file:
+                loaded_data = pickle.load(file)
+            state = loaded_data[data_name]
+            if rot_type.lower() == "airimu":
+                self.data["gt_orientation"] = state['airimu_rot']
+            elif rot_type.lower() == "integration":
+                self.data["gt_orientation"] = state['inte_rot']
+            else:
+                raise ValueError(f"Unsupported rotation type: {rot_type}")
 
         # rotate data to desired frame
-        self.update_coordinate(coordinate, mode)
+        if coordinate is not None:
+            if coordinate == "glob_coord":
+                self.data["gyro"] = self.data["gt_orientation"] @ self.data["gyro"]
+                self.data["acc"] = self.data["gt_orientation"] @ self.data["acc"]
+            elif coordinate == "body_coord":
+                self.g_vector = self.data["gt_orientation"].Inv() @ self.g_vector
+                if mode != "infevaluate" and mode != "inference":
+                    self.data["velocity"] = self.data["gt_orientation"].Inv() @ self.data["velocity"]
+            else:
+                raise ValueError(f"Unsupported coordinate system: {coordinate}")
 
         # remove gravity if necessary
-        self.remove_gravity(remove_g)
+        if remove_g:
+            print("gravity has been removed")
+            self.data["acc"] -= self.g_vector
 
     def get_length(self):
         return self.data["time"].shape[0]
@@ -136,42 +156,3 @@ class Uzurich(Sequence):
         intep_z = np.interp(time, xp=opt_time, fp=xyz[:, 2])
         inte_xyz = np.stack([intep_x, intep_y, intep_z]).transpose()
         return torch.tensor(inte_xyz)
-
-    def update_coordinate(self, coordinate, mode):
-        if coordinate is None:
-            return
-        try:
-            if coordinate == "glob_coord":
-                self.data["gyro"] = self.data["gt_orientation"] @ self.data["gyro"]
-                self.data["acc"] = self.data["gt_orientation"] @ self.data["acc"]
-            elif coordinate == "body_coord":
-                self.g_vector = self.data["gt_orientation"].Inv() @ self.g_vector
-                if mode != "infevaluate" and mode != "inference":
-                    self.data["velocity"] = self.data["gt_orientation"].Inv() @ self.data["velocity"]
-            else:
-                raise ValueError(f"Unsupported coordinate system: {coordinate}")
-        except Exception as e:
-            print("An error occurred while updating coordinates:", e)
-            raise e
-
-    def set_orientation(self, exp_path, data_name, rotation_type):
-        if rotation_type is None or rotation_type == "None" or rotation_type.lower() == "gtrot":
-            return
-        try:
-            with open(exp_path, 'rb') as file:
-                loaded_data = pickle.load(file)
-            state = loaded_data[data_name]
-            if rotation_type.lower() == "airimu":
-                self.data["gt_orientation"] = state['airimu_rot']
-            elif rotation_type.lower() == "integration":
-                self.data["gt_orientation"] = state['inte_rot']
-            else:
-                raise ValueError(f"Unsupported rotation type: {rotation_type}")
-        except FileNotFoundError:
-            print(f"The file {exp_path} was not found.")
-            raise
-
-    def remove_gravity(self, remove_g):
-        if remove_g:
-            print("gravity has been removed")
-            self.data["acc"] -= self.g_vector
