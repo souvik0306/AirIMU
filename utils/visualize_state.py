@@ -45,7 +45,7 @@ def visualize_state_error(save_prefix, relative_outstate, relative_infstate, \
     
     plt.tight_layout()
     if save_folder is not None:
-        plt.savefig(os.path.join(save_folder, save_prefix + file_name), dpi = 300)
+        plt.savefig(os.path.join(save_folder, save_prefix + file_name), dpi = 600)
     plt.show()
   
 
@@ -71,7 +71,7 @@ def visualize_rotations(save_prefix, gt_rot, out_rot, inf_rot = None,save_folder
             axs[i].legend(["Integrated_"+legend_list[i],"gt_"+legend_list[i],"AirIMU_"+legend_list[i]])
     plt.tight_layout()
     if save_folder is not None:
-        plt.savefig(os.path.join(save_folder, save_prefix+ "_orientation_compare.png"), dpi = 300)
+        plt.savefig(os.path.join(save_folder, save_prefix+ "_orientation_compare.png"), dpi = 600)
     plt.show()
 
 
@@ -90,7 +90,7 @@ def visualize_trajectory(save_prefix, save_folder, outstate, infstate):
     ax.legend()
     ax.set_aspect('equal', adjustable='box')
     
-    plt.savefig(os.path.join(save_folder, save_prefix+ "_trajectory_xy.png"), dpi = 300)
+    plt.savefig(os.path.join(save_folder, save_prefix+ "_trajectory_xy.png"), dpi = 600)
     plt.close()
     
     ###########################################################
@@ -104,7 +104,7 @@ def visualize_trajectory(save_prefix, save_folder, outstate, infstate):
     ax.set_ylabel('Z axis')
     ax.legend()
     ax.set_aspect('equal', adjustable='box')
-    plt.savefig(os.path.join(save_folder, save_prefix+ "_trajectory_xz.png"), dpi = 300)
+    plt.savefig(os.path.join(save_folder, save_prefix+ "_trajectory_xz.png"), dpi = 600)
     plt.close()
     
     ###########################################################
@@ -118,7 +118,7 @@ def visualize_trajectory(save_prefix, save_folder, outstate, infstate):
     ax.set_ylabel('Z axis')
     ax.legend()
     ax.set_aspect('equal', adjustable='box')
-    plt.savefig(os.path.join(save_folder, save_prefix+ "_trajectory_yz.png"), dpi = 300)
+    plt.savefig(os.path.join(save_folder, save_prefix+ "_trajectory_yz.png"), dpi = 600)
     plt.close()
     
     ###########################################################
@@ -142,7 +142,7 @@ def visualize_trajectory(save_prefix, save_folder, outstate, infstate):
     ax.set_zlabel('Z axis')
     ax.legend()
 
-    plt.savefig(os.path.join(save_folder, save_prefix+ "_trajectory_3d.png"), dpi = 300)
+    plt.savefig(os.path.join(save_folder, save_prefix+ "_trajectory_3d.png"), dpi = 600)
     plt.close()
 
 
@@ -178,6 +178,6 @@ def plot_boxes(folder, input_data, metrics, show_metrics):
     royalblue_patch = mpatches.Patch(color='royalblue', label='Raw')
     ax.legend(handles=[gold_patch, royalblue_patch])
     
-    plt.savefig(os.path.join(folder, "Metrics.png"), dpi = 300)
+    plt.savefig(os.path.join(folder, "Metrics.png"), dpi = 600)
     plt.close()
 
