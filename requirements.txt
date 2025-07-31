@@ -9,3 +9,5 @@ torch==2.6.0
 tqdm==4.66.5
 wandb==0.18.7
 pykitti
+pyproj
+opnencv-python
