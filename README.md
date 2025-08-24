@@ -75,6 +75,37 @@ To evaluate the model and generate network inference file net_output.pickle, run
 python inference.py --config configs/exp/EuRoC/codenet.conf
 ```
 
+### Inference on a standalone IMU CSV
+
+If only the raw IMU measurements are available (timestamps, gyroscope and accelerometer) you can run the network directly on the CSV files listed in the dataset configuration without any ground‑truth orientation:
+
+```
+python csv_inference.py --config configs/exp/EuRoC/codenet.conf \
+                        --ckpt experiments/EuRoC/codenet/ckpt/best_model.ckpt
+```
+
+The script reads each sequence's `mav0/imu0/data.csv` based on `data_root` and `data_drive` entries in the config and writes `net_output.pickle` keyed by sequence name containing corrected IMU data (`corrected_acc`, `corrected_gyro` and `dt`).
+
+### Exporting to ONNX
+
+Convert a training checkpoint to both ONNX and a plain PyTorch state dictionary:
+
+```
+python export_onnx.py --config configs/exp/EuRoC/codenet.conf \
+                      --ckpt experiments/EuRoC/codenet/ckpt/best_model.ckpt \
+                      --onnx codenet.onnx --torch codenet.pt
+```
+
+### Offline inference with ONNX
+
+Run an exported ONNX model directly on the IMU CSV files listed in the config:
+
+```
+python onnx_inference.py --config configs/exp/EuRoC/codenet.conf --onnx codenet.onnx
+```
+
+The resulting `net_output.pickle` matches the format produced by `csv_inference.py` and can be consumed by the evaluation tools.
+
 <br>
 
 You can use the evaluation tool to assess your model performance with net_output.pickle， run the following command.
