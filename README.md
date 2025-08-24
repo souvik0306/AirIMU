@@ -96,6 +96,11 @@ python export_onnx.py --config configs/exp/EuRoC/codenet.conf \
                       --onnx codenet.onnx --torch codenet.pt
 ```
 
+By default the ONNX model is exported in **float32** precision to ensure
+compatibility with the CPU execution provider of ONNX Runtime. If you need a
+float64 graph, pass `--fp64` (note that some runtimes lack double-precision
+`Conv` support).
+
 ### Offline inference with ONNX
 
 Run an exported ONNX model directly on the IMU CSV files listed in the config:

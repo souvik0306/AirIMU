@@ -19,6 +19,7 @@ def load_imu_csv(csv_path: str):
 
 def run(config: str, onnx_path: str, outfile: str) -> None:
     conf = ConfigFactory.parse_file(config)
+    conf.train.gtrot = False
     dataset_conf = conf.dataset.inference
 
     # Instantiate network to obtain interval length
@@ -34,8 +35,8 @@ def run(config: str, onnx_path: str, outfile: str) -> None:
             csv_path = os.path.join(root, seq, "mav0", "imu0", "data.csv")
             time, acc_all, gyro_all = load_imu_csv(csv_path)
             dt = time[1:] - time[:-1]
-            acc = acc_all[:-1]
-            gyro = gyro_all[:-1]
+            acc = acc_all[:-1].astype(np.float32)
+            gyro = gyro_all[:-1].astype(np.float32)
 
             acc_np = acc[np.newaxis, ...]
             gyro_np = gyro[np.newaxis, ...]

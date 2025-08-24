@@ -19,11 +19,20 @@ class CodeNetWrapper(torch.nn.Module):
 
 
 def export(config: str, ckpt: str, onnx_path: str, torch_path: str,
-           seq_len: int, opset: int) -> None:
+           seq_len: int, opset: int, fp64: bool) -> None:
     """Load a checkpoint and export to ONNX and PyTorch formats."""
     conf = ConfigFactory.parse_file(config)
     conf.train.gtrot = False
-    net = net_dict[conf.train.network](conf.train).double().eval()
+    net = net_dict[conf.train.network](conf.train).eval()
+
+    # Cast network to desired precision (float32 by default)
+    if fp64:
+        net = net.double()
+        dtype = torch.float64
+    else:
+        net = net.float()
+        dtype = torch.float32
+
     state = torch.load(ckpt, map_location="cpu")
     net.load_state_dict(state["model_state_dict"])
 
@@ -32,8 +41,8 @@ def export(config: str, ckpt: str, onnx_path: str, torch_path: str,
 
     # Prepare dummy inputs (seq_len >= net.interval + 1)
     L = max(seq_len, net.interval + 1)
-    acc = torch.zeros(1, L, 3, dtype=torch.float64)
-    gyro = torch.zeros(1, L, 3, dtype=torch.float64)
+    acc = torch.zeros(1, L, 3, dtype=dtype)
+    gyro = torch.zeros(1, L, 3, dtype=dtype)
 
     wrapper = CodeNetWrapper(net)
     torch.onnx.export(
@@ -61,9 +70,12 @@ def main() -> None:
     parser.add_argument("--seq-len", type=int, default=1000,
                         help="Dummy sequence length for export (>= interval+1)")
     parser.add_argument("--opset", type=int, default=17, help="ONNX opset version")
+    parser.add_argument("--fp64", action="store_true",
+                        help="Export in float64 precision (default: float32)")
     args = parser.parse_args()
 
-    export(args.config, args.ckpt, args.onnx, args.torch, args.seq_len, args.opset)
+    export(args.config, args.ckpt, args.onnx, args.torch,
+           args.seq_len, args.opset, args.fp64)
 
 
 if __name__ == "__main__":
