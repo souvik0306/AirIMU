@@ -4,6 +4,7 @@ import argparse
 import os
 import pickle
 import numpy as np
+import torch
 import onnxruntime as ort
 from pyhocon import ConfigFactory
 from model import net_dict
@@ -46,11 +47,11 @@ def run(config: str, onnx_path: str, outfile: str) -> None:
             dt_trimmed = dt[interval:, None]
 
             results[seq] = {
-                "correction_acc": corr_acc[0],
-                "correction_gyro": corr_gyro[0],
-                "corrected_acc": corrected_acc[0],
-                "corrected_gyro": corrected_gyro[0],
-                "dt": dt_trimmed,
+                "correction_acc": torch.from_numpy(corr_acc[0]).to(dtype=torch.float64),
+                "correction_gyro": torch.from_numpy(corr_gyro[0]).to(dtype=torch.float64),
+                "corrected_acc": torch.from_numpy(corrected_acc[0]).to(dtype=torch.float64),
+                "corrected_gyro": torch.from_numpy(corrected_gyro[0]).to(dtype=torch.float64),
+                "dt": torch.tensor(dt_trimmed, dtype=torch.float64),
             }
 
     with open(outfile, "wb") as f:

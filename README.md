@@ -109,7 +109,9 @@ Run an exported ONNX model directly on the IMU CSV files listed in the config:
 python onnx_inference.py --config configs/exp/EuRoC/codenet.conf --onnx codenet.onnx
 ```
 
-The resulting `net_output.pickle` matches the format produced by `csv_inference.py` and can be consumed by the evaluation tools.
+The resulting `net_output.pickle` stores all arrays as PyTorch tensors, matching the
+format produced by `csv_inference.py` so that downstream evaluation scripts that call
+`.cpu()` work without modification.
 
 <br>
 
