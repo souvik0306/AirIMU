@@ -11,3 +11,5 @@ wandb==0.18.7
 pykitti
 pyproj
 opencv-python
+onnx
+onnxruntime

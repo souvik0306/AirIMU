@@ -1,15 +1,18 @@
 # AirIMU : Learning Uncertainty Propagation for Inertial Odometry
+
 [![License: BSD 3-Clause](https://img.shields.io/badge/License-BSD%203--Clause-yellow.svg)](./LICENSE)
 [![YouTube](https://img.shields.io/badge/YouTube-b31b1b?style=flat&logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=fTX1u-e7wtU)
 [![arXiv](https://img.shields.io/badge/arXiv-AirIMU-orange.svg)](https://arxiv.org/abs/2310.04874)
 [![githubio](https://img.shields.io/badge/-homepage-blue?logo=Github&color=FF0000)](https://airimu.github.io/)
 
-
 ![AirIMU](./doc/model.png)
-## 📢 Latest News 
-- [2025-02-01] Introducing Our New Project!<br>
-  🚀 [**AirIO : Learning Inertial Odometry with Enhanced IMU Feature Observability**](https://github.com/Air-IO/Air-IO)<br>
- ```
+
+## 📢 Latest News
+
+- [2025-02-01] Introducing Our New Project!`<br>`
+  🚀 [**AirIO : Learning Inertial Odometry with Enhanced IMU Feature Observability**](https://github.com/Air-IO/Air-IO)`<br>`
+
+```
 AirIO achieves up to 86.6% performance boost over SOTA methods:
 
 - ✅ Tailored specifically for drones
@@ -23,8 +26,8 @@ AirIO achieves up to 86.6% performance boost over SOTA methods:
 This work is based on pypose. Follow the instruction and install the newest realase of pypose:
 https://github.com/pypose/pypose
 
-
 ## Dataset
+
 > **Note**: Remember to reset the `data_root` in `configs/datasets/${DATASET}/${DATASET}.conf`.
 
 Download the Euroc dataset from:
@@ -38,17 +41,18 @@ https://www.cvlibs.net/datasets/kitti/
 
 Download the SubT-MRS dataset: [Download](https://github.com/sleepycan/AirIMU/releases/download/subt_dataset/SubT-MRS-Dataset.zip).   🎈You can find more information about SubT-MRS datasets from the links [here](SubT-MRS-DATASET.md).
 
-
 ## Pretrained Model
-> **Note**: You can download our trained ckpt here.
 
+> **Note**: You can download our trained ckpt here.
 
 [KITTI](https://github.com/sleepycan/AirIMU/releases/download/pretrained_model/KITTI_odom_model.zip)
 
 [EuRoC](https://github.com/sleepycan/AirIMU/releases/download/pretrained_model_euroc/EuRoCWholeaug.zip)
+
 ## Train
 
 Easy way to start the training using the exisiting configuration.
+
 > **Note**:You can also create your own configuration file for different datasets and set the parameters accordingly.
 
 ```
@@ -71,13 +75,52 @@ optional arguments:
 ## Evaluation
 
 To evaluate the model and generate network inference file net_output.pickle, run the following command:
+
 ```
 python inference.py --config configs/exp/EuRoC/codenet.conf
 ```
 
+### Inference on a standalone IMU CSV
+
+If only the raw IMU measurements are available (timestamps, gyroscope and accelerometer) you can run the network directly on the CSV files listed in the dataset configuration without any ground‑truth orientation:
+
+```
+python inference_offline.py --config configs/exp/EuRoC/codenet.conf \
+                        --ckpt experiments/EuRoC/codenet/ckpt/best_model.ckpt
+```
+
+The script reads each sequence's `mav0/imu0/data.csv` based on `data_root` and `data_drive` entries in the config and writes `net_output.pickle` keyed by sequence name containing corrected IMU data (`corrected_acc`, `corrected_gyro` and `dt`).
+
+### Exporting to ONNX
+
+Convert a training checkpoint to both ONNX and a plain PyTorch state dictionary:
+
+```
+python export_onnx.py --config configs/exp/EuRoC/codenet.conf \
+                      --ckpt experiments/EuRoC/codenet/ckpt/best_model.ckpt \
+                      --onnx airimu_euroc.onnx --torch airimu_euroc.pt
+```
+
+By default the ONNX model is exported in **float32** precision to ensure
+compatibility with the CPU execution provider of ONNX Runtime. If you need a
+float64 graph, pass `--fp64` (note that some runtimes lack double-precision
+`Conv` support).
+
+### Offline inference with ONNX
+
+Run an exported ONNX model directly on the IMU CSV files listed in the config:
+
+```
+python onnx_inference.py --config configs/exp/EuRoC/codenet.conf --onnx codenet.onnx
+```
+
+The resulting `net_output.pickle` stores all arrays as PyTorch tensors, matching the
+format produced by `inference_offline.py` so that downstream evaluation scripts that call `.cpu()` work without modification.
+
 <br>
 
 You can use the evaluation tool to assess your model performance with net_output.pickle， run the following command.
+
 > **Note**: Make sure to replace path/to/net_output_directory with the directory path where your network output pickle file is stored.
 
 ```
@@ -100,10 +143,6 @@ optional arguments:
   --usegtrot       use ground truth rotation for gravity compensation, default is true
   --mask           mask the segments if needed. 
 ```
-
-
-
-
 
 ### Cite Our Work
 

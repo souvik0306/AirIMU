@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import pypose as pp
+import math
 
 import torch.nn as nn
 from model.net import ModelBase
@@ -60,24 +61,39 @@ class CodeNet(ModelBase):
         return torch.cat([acc, gyro], dim = -1)
 
     def _update(self, to_update, feat, frame_len):
-        ### Note: This will change the data in the to_update !!!!!!
-        def _clip(x,l):
+        """Scatter corrections over the original sequence length.
+
+        Parameters
+        ----------
+        to_update : torch.Tensor
+            Tensor to accumulate the corrections into.
+        feat : torch.Tensor
+            Predicted correction features.
+        frame_len : int or Tensor
+            Length of the original sequence before padding.
+        """
+
+        # ``frame_len`` may be a ``torch.SymInt``/Tensor during ONNX tracing.
+        # Convert to a Python integer so that math utilities work consistently.
+        if not isinstance(frame_len, int):
+            frame_len = int(frame_len.item() if hasattr(frame_len, "item") else frame_len)
+
+        def _clip(x, l):
             if x > l:
                 return l
-            elif x < 0:
+            if x < 0:
                 return 0
-            else:
-                return x
+            return x
 
-        _feat_range = np.ceil((frame_len-self.inter_head)/self.interval).astype(int) + 1 ## not equivalent to features shape
+        _feat_range = math.ceil((frame_len - self.inter_head) / self.interval) + 1
 
         for i in range(_feat_range):
-            s_p = _clip(i*self.interval-self.inter_head, frame_len)
-            e_p = _clip(i*self.interval+self.inter_tail, frame_len)
-            idx = _clip(i, feat.shape[1]-1)
+            s_p = _clip(i * self.interval - self.inter_head, frame_len)
+            e_p = _clip(i * self.interval + self.inter_tail, frame_len)
+            idx = _clip(i, feat.shape[1] - 1)
 
             # skip the first padded input
-            to_update[:,s_p:e_p,:] += feat[:,idx:idx+1,:]
+            to_update[:, s_p:e_p, :] += feat[:, idx:idx + 1, :]
 
         return to_update
 
