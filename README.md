@@ -111,8 +111,12 @@ float64 graph, pass `--fp64` (note that some runtimes lack double-precision
 Run an exported ONNX model directly on the IMU CSV files listed in the config:
 
 ```
-python onnx_inference.py --config configs/exp/EuRoC/codenet.conf --onnx codenet.onnx
+python inference_onnx.py --config configs/exp/EuRoC/codenet.conf \
+                         --onnx airimu_euroc.onnx --seqlen 1000
 ```
+Pass `--whole` to process an entire sequence in a single pass; otherwise the IMU
+stream is chunked into windows of length `--seqlen`, mirroring the behaviour of
+`inference.py`.
 
 The resulting `net_output.pickle` stores all arrays as PyTorch tensors, matching the
 format produced by `inference_offline.py` so that downstream evaluation scripts that call `.cpu()` work without modification.
