@@ -60,10 +60,9 @@ def run(config: str, onnx_path: str, outfile: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run AirIMU ONNX model on IMU CSVs")
-    parser.add_argument("--config", default="configs/exp/EuRoC/codenet.conf",
-                        help="Model config file")
+    parser.add_argument("--config", default="configs/exp/EuRoC/codenet.conf", help="Model config file")
     parser.add_argument("--onnx", default="codenet.onnx", help="ONNX model file")
-    parser.add_argument("--out", default="net_output_onnx.pickle", help="Output pickle")
+    parser.add_argument("--out", default="experiments/euroc/codenet/net_output_onnx.pickle", help="Output pickle")
     args = parser.parse_args()
 
     run(args.config, args.onnx, args.out)
