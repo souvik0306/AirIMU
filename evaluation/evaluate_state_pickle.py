@@ -8,11 +8,14 @@ sequence from disk, applies the corrections, and computes the same
 metrics and plots as the original evaluation utility.
 """
 
+import os
+import sys
 import argparse
 import json
-import os
 import pickle
 from typing import Dict, List
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir)))
 
 import numpy as np
 import pypose as pp
