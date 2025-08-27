@@ -141,8 +141,23 @@ optional arguments:
   --seqlen         the length of the integration sequence
   --savedir        the save diretory for the evaluation results, default path is  "./result/loss_result"
   --usegtrot       use ground truth rotation for gravity compensation, default is true
-  --mask           mask the segments if needed. 
+  --mask           mask the segments if needed.
 ```
+
+If you generated `net_output.pickle` using the ROS inference node, the
+file contains a list of IMU correction chunks without sequence names.
+You can evaluate such a file with:
+
+```
+python evaluation/evaluate_state_pickle.py \
+    --pickle path/to/net_output.pickle \
+    --seq-name MH_02_easy \
+    --dataconf configs/datasets/${DATASET}/${DATASET}.conf
+```
+
+The script produces the same plots and `loss_result.json` as
+`evaluate_state.py` but reads corrections directly from the ROS
+generated pickle.
 
 
 
