@@ -45,7 +45,7 @@ def run(config: str, onnx_path: str, outfile: str, seqlen: int, whole: bool) -> 
     net = net_dict[conf.train.network](conf.train)
     interval = getattr(net, "interval", 0)
 
-    sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+    onnx_model = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
     results = {}
 
     for data_conf in dataset_conf.data_list:
@@ -74,7 +74,7 @@ def run(config: str, onnx_path: str, outfile: str, seqlen: int, whole: bool) -> 
             for acc, gyro, dt in splits:
                 acc_np = acc[np.newaxis, ...]
                 gyro_np = gyro[np.newaxis, ...]
-                corr_acc, corr_gyro = sess.run(None, {"acc": acc_np, "gyro": gyro_np})
+                corr_acc, corr_gyro = onnx_model.run(None, {"acc": acc_np, "gyro": gyro_np})
                 corrected_acc = acc_np[:, interval:, :] + corr_acc
                 corrected_gyro = gyro_np[:, interval:, :] + corr_gyro
                 dt_trimmed = dt[interval:, None]
