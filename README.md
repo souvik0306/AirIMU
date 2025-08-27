@@ -118,6 +118,20 @@ The resulting `net_output.pickle` stores all arrays as PyTorch tensors, matching
 format produced by `csv_inference.py` so that downstream evaluation scripts that call
 `.cpu()` work without modification.
 
+### Converting ONNX pickles for evaluation
+
+When an ONNX-based pipeline (e.g. a ROS node) writes a pickle without sequence
+names or with NumPy arrays, convert it to the canonical format expected by
+`evaluation/evaluate_state.py`:
+
+```
+python onnx_pickle_convert.py raw_results.pickle MH_02_easy net_output.pickle
+```
+
+This utility concatenates all chunks, casts arrays to `torch.Tensor`, inserts
+zero covariances, and stores the output under the provided sequence name so it
+can be evaluated with `evaluation/evaluate_state.py`.
+
 <br>
 
 You can use the evaluation tool to assess your model performance with net_output.pickle， run the following command.
