@@ -10,5 +10,5 @@ tqdm==4.66.5
 wandb==0.18.7
 pykitti
 pyproj
-onnx
-onnxruntime
+onnx==1.18.0
+onnxruntime==1.20.0
