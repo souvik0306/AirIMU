@@ -233,7 +233,10 @@ class SeqeuncesDataset(Data.Dataset):
             'gt_vel': self.gt_velo[seq_id][frame_id+1 : end_frame_id+1],
         }
 
-        return {**data, **init_state, **label}
+        out = dict(data)
+        out.update(init_state)
+        out.update(label)
+        return out
 
     def get_dtype(self):
         return self.acc[0].dtype

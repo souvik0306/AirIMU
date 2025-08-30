@@ -75,7 +75,9 @@ class ModelBase(nn.Module):
             out_state = self.integrator(init_state = init_state, dt = data['dt'], gyro = data['corrected_gyro'],
                             acc = data['corrected_acc'], rot = gt_rot, acc_cov = cov_state['acc_cov'], gyro_cov = cov_state['gyro_cov'])
         
-        return {**out_state, **cov_state}
+        out = dict(out_state)
+        out.update(cov_state)
+        return out
 
     def inference(self, data):
         '''
@@ -95,7 +97,10 @@ class ModelBase(nn.Module):
             cov = self.cov_decoder(feature)
             cov_state['acc_cov'] = cov[...,:3]; cov_state['gyro_cov'] = cov[...,3:]
 
-        return {**cov_state, 'correction_acc': correction[...,:3], 'correction_gyro': correction[...,3:]}
+        out = dict(cov_state)
+        out['correction_acc'] = correction[...,:3]
+        out['correction_gyro'] = correction[...,3:]
+        return out
  
     ## For reference
     def forward(self, data, init_state):
@@ -114,4 +119,7 @@ class ModelBase(nn.Module):
             cov_state['acc_cov'] = cov[...,:3]; cov_state['gyro_cov'] = cov[...,3:]
 
         out_state = self.integrate(init_state = init_state, data = data, cov_state = cov_state)
-        return {**out_state, 'correction_acc': correction[...,:3], 'correction_gyro': correction[...,3:]}
+        out = dict(out_state)
+        out['correction_acc'] = correction[...,:3]
+        out['correction_gyro'] = correction[...,3:]
+        return out
