@@ -25,7 +25,22 @@ def inference(network, loader, confs):
 
     with torch.no_grad():
         inte_state = None
+        first_batch = True
         for data, _, _ in tqdm.tqdm(loader):
+            # Print padding info for first batch only
+            if first_batch:
+                print(f"\n=== Padding Check (First Batch) ===")
+                print(f"Input acc shape after collate: {data['acc'].shape}")
+                print(f"Input gyro shape after collate: {data['gyro'].shape}")
+                print(f"Expected window_size from config: {data.get('window_size', 'not in data')}")
+                if data['acc'].shape[1] > 1:
+                    print(f"⚠️  PADDING DETECTED: Input has {data['acc'].shape[1]} samples (more than window_size)")
+                    print(f"   Padding amount: {data['acc'].shape[1] - 1} frames")
+                else:
+                    print(f"✓ No padding detected (or window_size matches input)")
+                print(f"===================================\n")
+                first_batch = False
+            
             data = move_to(data, confs.device)
             # Use the gt init state while there is no integration.
             inte_state = network.inference(data)
@@ -44,8 +59,8 @@ if __name__ == '__main__':
     parser.add_argument('--load', type=str, default=None, help='path for model check point')
     parser.add_argument("--device", type=str, default="cuda:0", help="cuda or cpu")
     parser.add_argument('--batch_size', type=int, default=1, help='batch size.')
-    parser.add_argument('--window_size', type=int, default=1000, help='window size for sliding window')
-    parser.add_argument('--step_size', type=int, default=1000, help='step size for sliding window')
+    parser.add_argument('--window_size', type=int, default=1, help='window size for sliding window')
+    parser.add_argument('--step_size', type=int, default=1, help='step size for sliding window')
     parser.add_argument('--train', default=False, action="store_true", help='if True, We will evaluate the training set (may be removed in the future).')
     parser.add_argument('--gtinit', default=True, action="store_false", help='if set False, we will use the integrated pose as the intial pose for the next integral')
     parser.add_argument('--whole', default=False, action="store_true", help='(may be removed in the future).')
@@ -135,13 +150,39 @@ if __name__ == '__main__':
             inference_state = inference(network=network, loader = eval_loader, confs=conf.train)
 
             # Print output info
-            print("\nModel output keys and shapes:")
+            print("\n" + "="*80)
+            print("FINAL SUMMARY")
+            print("="*80)
+            print(f"\n8. AGGREGATED OUTPUT (all windows concatenated):")
             for k, v in inference_state.items():
                 if hasattr(v, 'shape'):
-                    print(f"  {k}: {v.shape}, dtype={v.dtype}")
+                    print(f"   - {k}: shape={v.shape}, dtype={v.dtype}")
                 else:
-                    print(f"  {k}: type={type(v)}")
-            print(f"Number of output samples (correction_acc): {inference_state['correction_acc'].shape[0] if hasattr(inference_state['correction_acc'], 'shape') else 'N/A'}")
+                    print(f"   - {k}: type={type(v)}")
+            
+            print(f"\n9. APPLYING CORRECTIONS:")
+            print(f"   - Original IMU acc shape: {eval_dataset.acc[0].shape}")
+            print(f"   - Correction acc shape: {inference_state['correction_acc'].squeeze(0).shape}")
+            print(f"   - Expected: Both should match to add corrections")
+            if eval_dataset.acc[0].shape[0] != inference_state['correction_acc'].squeeze(0).shape[0]:
+                print(f"   ⚠️  WARNING: Shape mismatch detected!")
+                print(f"   - This happens with overlapping windows (step_size < window_size)")
+                print(f"   - You need to implement stitching/averaging of overlapping outputs")
+            else:
+                print(f"   ✓ Shapes match - can directly add corrections")
+            
+            print(f"\n10. FOR REAL-TIME INFERENCE (without GT):")
+            print(f"   You need to provide for EACH window:")
+            print(f"   a) Real IMU data: N samples (e.g., {window_size})")
+            print(f"   b) Initial orientation estimate: quaternion [qx,qy,qz,qw]")
+            print(f"      - Use identity [0,0,0,1] if unknown")
+            print(f"      - Or estimate from stationary IMU samples")
+            print(f"   c) Generate padding: {9} synthetic frames")
+            print(f"      - pad_acc = quat_inv(init_rot) * [0,0,9.81]")
+            print(f"      - pad_gyro = [0,0,0]")
+            print(f"   d) Concatenate: [padding] + [real_data]")
+            print(f"   e) Model output: corrections for N real samples")
+            print("="*80 + "\n")
             print("--- End of sequence ---\n")
 
             if not "acc_cov" in inference_state.keys():

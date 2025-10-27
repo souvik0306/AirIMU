@@ -99,6 +99,27 @@ class CodeNet(ModelBase):
 
     def inference(self, data):
         frame_len = data["acc"].shape[1] - self.interval
+        
+        # Debug print for first call
+        if not hasattr(self, '_inference_printed'):
+            print("\n" + "="*80)
+            print("MODEL INFERENCE - DETAILED BREAKDOWN")
+            print("="*80)
+            
+            print(f"\n5. MODEL INPUT (after padding):")
+            print(f"   - Input acc shape: {data['acc'].shape}")
+            print(f"   - Input gyro shape: {data['gyro'].shape}")
+            print(f"   - self.interval (frames to skip): {self.interval}")
+            print(f"   - frame_len (output length): {frame_len}")
+            print(f"   - Calculation: frame_len = {data['acc'].shape[1]} - {self.interval} = {frame_len}")
+            
+            print(f"\n6. MODEL PROCESSING:")
+            print(f"   - The model will process ALL {data['acc'].shape[1]} input frames")
+            print(f"   - But only output corrections for the last {frame_len} frames")
+            print(f"   - This means: skip first {self.interval} padding frames")
+            
+            self._inference_printed = True
+        
         feature = torch.cat([data["acc"], data["gyro"]], dim = -1)
         feature = self.encoder(feature)[:,1:,:]
         correction = self.decoder(feature)
@@ -107,6 +128,21 @@ class CodeNet(ModelBase):
         # a referenced size 1000
         correction_acc = self._update(zero_signal.clone(), correction[...,:3], frame_len)
         correction_gyro = self._update(zero_signal.clone(), correction[...,3:], frame_len)
+        
+        # Print output info for first call
+        if not hasattr(self, '_output_printed'):
+            print(f"\n7. MODEL OUTPUT:")
+            print(f"   - correction_acc shape: {correction_acc.shape}")
+            print(f"   - correction_gyro shape: {correction_gyro.shape}")
+            print(f"   - Output length matches real data: {frame_len} frames")
+            print(f"   - First 3 correction_acc values:")
+            for i in range(min(3, correction_acc.shape[1])):
+                print(f"     correction_acc[{i}] = {correction_acc[0, i, :].detach().cpu().tolist()}")
+            print(f"   - First 3 correction_gyro values:")
+            for i in range(min(3, correction_gyro.shape[1])):
+                print(f"     correction_gyro[{i}] = {correction_gyro[0, i, :].detach().cpu().tolist()}")
+            print("="*80 + "\n")
+            self._output_printed = True
 
         # covariance propagation
         cov_state = {'acc_cov':None, 'gyro_cov': None,}
