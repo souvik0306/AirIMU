@@ -163,8 +163,12 @@ class CodeNet(ModelBase):
 
         out_state = self.integrate(init_state = init_state, data = data, cov_state = inference_state['cov_state'])
 
-        return {**out_state, 'correction_acc': inference_state['correction_acc'], 'correction_gyro': inference_state['correction_gyro'], 
-                                'corrected_acc': data['corrected_acc'], 'corrected_gyro': data['corrected_gyro']}
+        out = dict(out_state)
+        out['correction_acc'] = inference_state['correction_acc']
+        out['correction_gyro'] = inference_state['correction_gyro']
+        out['corrected_acc'] = data['corrected_acc']
+        out['corrected_gyro'] = data['corrected_gyro']
+        return out
 
 
 class CodePoseNet(CodeNet):
@@ -246,7 +250,9 @@ class CodeNetKITTI(torch.nn.Module):
                 rot = gt_rot, 
             )
         
-        return {**out_state, **cov_state}
+        out = dict(out_state)
+        out.update(cov_state)
+        return out
 
     def inference(self, data):
         feature_acc  = self.accEncoder(data["acc"].transpose(-1,-2)).transpose(-1,-2)
@@ -276,10 +282,9 @@ class CodeNetKITTI(torch.nn.Module):
 
         out_state = self.integrate(init_state=init_state_, data = data, cov_state = inference_state['cov_state'], use_gtrot=use_gtrot)
         
-        return {
-            **out_state, 
-            'correction_acc': inference_state['correction_acc'], 
-            'correction_gyro': inference_state['correction_gyro'], 
-            'corrected_acc': data['corrected_acc'], 
-            'corrected_gyro': data['corrected_gyro']
-        }
+        out = dict(out_state)
+        out['correction_acc'] = inference_state['correction_acc']
+        out['correction_gyro'] = inference_state['correction_gyro']
+        out['corrected_acc'] = data['corrected_acc']
+        out['corrected_gyro'] = data['corrected_gyro']
+        return out
