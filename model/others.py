@@ -41,4 +41,7 @@ class ParamNet(ModelBase):
             cov_state['gyro_cov'] = torch.zeros_like(data['corrected_gyro']) + self.gyro_cov**2
 
         out_state = self.integrate(init_state = init_state, data = data, cov_state = cov_state)
-        return {**out_state, 'correction_acc': self.acc_bias, 'correction_gyro': self.gyro_bias}
+        out = dict(out_state)
+        out['correction_acc'] = self.acc_bias
+        out['correction_gyro'] = self.gyro_bias
+        return out
