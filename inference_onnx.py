@@ -41,6 +41,23 @@ def inference(onnx_session, loader, confs, interval=9, torch_net=None, verbose=F
     Returns:
         evaluate_states: Dictionary with correction results
     """
+    # Detect ONNX model input dtype and shape
+    input_dtype_str = onnx_session.get_inputs()[0].type
+    is_fp16 = 'float16' in input_dtype_str
+    
+    # Get expected input sequence length from ONNX model
+    onnx_input_shape = onnx_session.get_inputs()[0].shape
+    expected_seq_len = onnx_input_shape[1]  # e.g., 1009 for 1000 real + 9 padding
+    
+    if is_fp16:
+        print("⚠️  ONNX model uses float16 precision")
+        np_dtype = np.float16
+    else:
+        print("✓ ONNX model uses float32 precision")
+        np_dtype = np.float32
+    
+    print(f"✓ ONNX model expects fixed input shape: {onnx_input_shape}")
+    
     evaluate_states = {}
 
     with torch.no_grad():
@@ -58,25 +75,49 @@ def inference(onnx_session, loader, confs, interval=9, torch_net=None, verbose=F
                 print(f"===================================\n")
                 first_batch = False
             
-            # Convert to numpy for ONNX Runtime
-            acc_np = data['acc'].cpu().numpy().astype(np.float32)
-            gyro_np = data['gyro'].cpu().numpy().astype(np.float32)
+            # Get actual sequence length from batch
+            actual_seq_len = data['acc'].shape[1]
+            actual_real_frames = actual_seq_len - interval
+            
+            # Pad batch if it's shorter than expected (handles last batch with fewer frames)
+            if actual_seq_len < expected_seq_len:
+                pad_amount = expected_seq_len - actual_seq_len
+                # Pad with zeros at the end
+                acc_padded = torch.cat([data['acc'], torch.zeros(1, pad_amount, 3)], dim=1)
+                gyro_padded = torch.cat([data['gyro'], torch.zeros(1, pad_amount, 3)], dim=1)
+            else:
+                acc_padded = data['acc']
+                gyro_padded = data['gyro']
+            
+            # Convert to numpy with correct dtype for ONNX model
+            acc_np = acc_padded.cpu().numpy().astype(np_dtype)
+            gyro_np = gyro_padded.cpu().numpy().astype(np_dtype)
             
             # Run ONNX inference
-            # Input: [batch, N+interval, 3] -> Output: [batch, N, 3]
-            corr_acc, corr_gyro = onnx_session.run(
+            # Input: [batch, expected_seq_len, 3] -> Output: [batch, expected_seq_len-interval, 3]
+            corr_acc_full, corr_gyro_full = onnx_session.run(
                 None,  # Return all outputs
                 {"acc": acc_np, "gyro": gyro_np}
             )
+            
+            # Trim output to actual number of real frames (remove extra padding)
+            corr_acc = corr_acc_full[:, :actual_real_frames, :]
+            corr_gyro = corr_gyro_full[:, :actual_real_frames, :]
 
             # Optional debug: compare ONNX output with PyTorch model on first batch
             if (torch_net is not None) and (not compare_done):
                 try:
-                    # Prepare PyTorch inputs (float32 to match ONNX)
-                    data_torch = {
-                        'acc': data['acc'].float(),
-                        'gyro': data['gyro'].float()
-                    }
+                    # Prepare PyTorch inputs (match model precision)
+                    if is_fp16:
+                        data_torch = {
+                            'acc': data['acc'].half(),
+                            'gyro': data['gyro'].half()
+                        }
+                    else:
+                        data_torch = {
+                            'acc': data['acc'].float(),
+                            'gyro': data['gyro'].float()
+                        }
                     # Run PyTorch inference (model.inference expects dict)
                     with torch.no_grad():
                         pt_out = torch_net.inference(data_torch)
@@ -97,10 +138,10 @@ def inference(onnx_session, loader, confs, interval=9, torch_net=None, verbose=F
                     print(f"[DEBUG] PyTorch comparison failed: {e}")
                 compare_done = True
             
-            # Convert back to torch tensors
+            # Convert back to torch tensors (always use float64 for downstream processing)
             inte_state = {
-                'correction_acc': torch.from_numpy(corr_acc).to(dtype=torch.float64),
-                'correction_gyro': torch.from_numpy(corr_gyro).to(dtype=torch.float64)
+                'correction_acc': torch.from_numpy(corr_acc.astype(np.float64)),
+                'correction_gyro': torch.from_numpy(corr_gyro.astype(np.float64))
             }
             
             # Save state (accumulate across batches)

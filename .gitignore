@@ -1,0 +1,3 @@
+*.onnx
+*.pt
+plot_files/*

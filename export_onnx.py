@@ -90,18 +90,17 @@ class CodeNetWrapper(torch.nn.Module):
 
 
 def export(config: str, ckpt: str, onnx_path: str, torch_path: str,
-           seq_len: int, opset: int, fp64: bool) -> None:
+           opset: int, num_imu_frames: int) -> None:
     """
-    Load a trained checkpoint and export to ONNX format.
+    Load a trained checkpoint and export to ONNX format with FIXED input shape.
     
     Args:
         config: Path to model configuration file (.conf)
         ckpt: Path to trained checkpoint file (.ckpt)
         onnx_path: Output path for ONNX model (.onnx)
         torch_path: Output path for PyTorch weights (.pt)
-        seq_len: Dummy sequence length for export (must be >= interval+1)
         opset: ONNX opset version (17 recommended)
-        fp64: If True, export in float64; if False, export in float32 (recommended)
+        num_imu_frames: Number of real IMU frames to process (padding added automatically)
     """
     print(f"Loading configuration from: {config}")
     conf = ConfigFactory.parse_file(config)
@@ -123,18 +122,13 @@ def export(config: str, ckpt: str, onnx_path: str, torch_path: str,
     for module in net.modules():
         module.eval()
     
-    # Convert to target precision
-    # IMPORTANT: fp32 is recommended for CPU deployment (7.45e-08 error vs fp64)
-    if fp64:
-        net = net.double()
-        dtype = torch.float64
-        print("✓ Using float64 precision (slower, maximum accuracy)")
-    else:
-        net = net.float()
-        dtype = torch.float32
-        print("✓ Using float32 precision (faster, 7.45e-08 error - RECOMMENDED)")
+    # Always use float32 precision
+    net = net.float()
+    dtype = torch.float32
+    print("✓ Using float32 precision")
 
-    print(f"Model interval (padding frames): {net.interval}")
+    padding_frames = net.interval
+    print(f"Model padding frames: {padding_frames}")
     
     # Save PyTorch state dict (useful for loading without ONNX)
     torch.save(net.state_dict(), torch_path)
@@ -143,25 +137,15 @@ def export(config: str, ckpt: str, onnx_path: str, torch_path: str,
     # ============================================================================
     # PREPARE DUMMY INPUTS FOR ONNX EXPORT
     # ============================================================================
-    # The dummy inputs define the shape and type of the ONNX model's inputs.
-    # seq_len must be >= net.interval + 1 (typically interval=9, so min is 10)
-    #
-    # For runtime with N real samples:
-    #   - Add 9 padding frames → total input length = N + 9
-    #   - Model outputs N corrections (first 9 frames are skipped)
-    #
-    # Example for single sample (N=1):
-    #   Input:  [1, 10, 3]  (1 batch, 10 frames with padding, 3 axes)
-    #   Output: [1, 1, 3]   (1 batch, 1 correction, 3 axes)
+    total_seq_len = padding_frames + num_imu_frames
+    print(f"\nInput configuration:")
+    print(f"  Real IMU frames: {num_imu_frames}")
+    print(f"  Padding frames:  {padding_frames}")
+    print(f"  Total input:     [1, {total_seq_len}, 3]")
+    print(f"  Output:          [1, {num_imu_frames}, 3]")
     
-    L = max(seq_len, net.interval + 1)
-    print(f"\nDummy input configuration:")
-    print(f"  Sequence length: {L} (includes {net.interval} padding frames)")
-    print(f"  Input shape: [batch=1, seq_len={L}, axes=3]")
-    print(f"  Output shape: [batch=1, seq_len={L - net.interval}, axes=3]")
-    
-    acc = torch.zeros(1, L, 3, dtype=dtype)
-    gyro = torch.zeros(1, L, 3, dtype=dtype)
+    acc = torch.zeros(1, total_seq_len, 3, dtype=dtype)
+    gyro = torch.zeros(1, total_seq_len, 3, dtype=dtype)
 
     # Wrap model for ONNX export
     wrapper = CodeNetWrapper(net)
@@ -175,29 +159,17 @@ def export(config: str, ckpt: str, onnx_path: str, torch_path: str,
     # ============================================================================
     # EXPORT TO ONNX
     # ============================================================================
-    print(f"\nExporting to ONNX (opset version {opset})...")
+    print(f"\nExporting to ONNX (opset {opset})...")
     torch.onnx.export(
-        wrapper,                          # Model to export
-        (acc, gyro),                      # Dummy inputs
-        onnx_path,                        # Output file path
-        
-        # Input/output names (used to reference tensors in ONNX runtime)
+        wrapper,
+        (acc, gyro),
+        onnx_path,
         input_names=["acc", "gyro"],
         output_names=["corr_acc", "corr_gyro"],
-        
-        # Dynamic axes allow variable sequence length at runtime
-        # {tensor_name: {axis_index: symbolic_name}}
-        dynamic_axes={
-            "acc": {1: "seq"},           # dim 1 (sequence length) is dynamic
-            "gyro": {1: "seq"},          # dim 1 (sequence length) is dynamic
-            "corr_acc": {1: "seq"},      # dim 1 (sequence length) is dynamic
-            "corr_gyro": {1: "seq"}      # dim 1 (sequence length) is dynamic
-        },
-        
-        opset_version=opset,             # ONNX opset version (17 recommended)
-        do_constant_folding=True,        # Optimize constant operations
-        training=torch.onnx.TrainingMode.EVAL,  # Explicitly set eval mode
-        verbose=False                    # Set to True for debug info
+        opset_version=opset,
+        do_constant_folding=True,
+        training=torch.onnx.TrainingMode.EVAL,
+        verbose=False
     )
     print(f"✓ Saved ONNX model to: {onnx_path}")
     
@@ -214,10 +186,14 @@ def export(config: str, ckpt: str, onnx_path: str, torch_path: str,
             providers=['CPUExecutionProvider']
         )
         
+        # Prepare inputs in correct dtype
+        acc_input = acc.numpy()
+        gyro_input = gyro.numpy()
+        
         # Run inference with dummy inputs
         onnx_outputs = sess.run(
             None,  # Return all outputs
-            {"acc": acc.numpy(), "gyro": gyro.numpy()}
+            {"acc": acc_input, "gyro": gyro_input}
         )
         
         # Compare ONNX output with PyTorch output
@@ -229,12 +205,13 @@ def export(config: str, ckpt: str, onnx_path: str, torch_path: str,
         print(f"  Max difference (acc):  {diff_acc:.2e}")
         print(f"  Max difference (gyro): {diff_gyro:.2e}")
         
-        # Check if differences are acceptable
-        threshold = 1e-5 if fp64 else 1e-4
+        # Check if differences are acceptable for fp32
+        threshold = 1e-4
+        
         if diff_acc < threshold and diff_gyro < threshold:
             print("  ✓ ONNX export verified - outputs match PyTorch!")
         else:
-            print("  ⚠️  Large differences detected (may need investigation)")
+            print(f"  ⚠️  Differences detected - acc: {diff_acc:.2e}, gyro: {diff_gyro:.2e}")
             
     except ImportError:
         print("\n⚠️  onnxruntime not installed - skipping verification")
@@ -248,60 +225,26 @@ def export(config: str, ckpt: str, onnx_path: str, torch_path: str,
     print("\n" + "="*70)
     print("EXPORT COMPLETE")
     print("="*70)
-    print(f"\nONNX Model Specification:")
-    print(f"  Precision: {'float64' if fp64 else 'float32 (RECOMMENDED)'}")
-    print(f"  Padding frames: {net.interval}")
-    print(f"  Min input length: {net.interval + 1}")
-    print(f"\nInput Format (at runtime):")
-    print(f"  Input 'acc':  [1, N+{net.interval}, 3] - N real samples + {net.interval} padding")
-    print(f"  Input 'gyro': [1, N+{net.interval}, 3] - N real samples + {net.interval} padding")
-    print(f"\nOutput Format:")
-    print(f"  Output 'corr_acc':  [1, N, 3] - corrections for N real samples")
-    print(f"  Output 'corr_gyro': [1, N, 3] - corrections for N real samples")
-    print(f"\nFiles Created:")
-    print(f"  ONNX model:      {onnx_path}")
-    print(f"  PyTorch weights: {torch_path}")
-    print(f"\nNext Steps:")
-    print(f"  1. Use inference_onnx.py to test the exported model")
-    print(f"  2. Add {net.interval} padding frames before each inference")
-    print(f"  3. For single sample: input shape [1, {net.interval + 1}, 3]")
+    print(f"\nONNX Model:")
+    print(f"  Precision: float32")
+    print(f"  Input:  [1, {total_seq_len}, 3] ({num_imu_frames} real + {padding_frames} padding)")
+    print(f"  Output: [1, {num_imu_frames}, 3]")
+    print(f"\nFiles:")
+    print(f"  ONNX:    {onnx_path}")
+    print(f"  PyTorch: {torch_path}")
     print("="*70)
 
 
 def main() -> None:
     """
-    Main entry point for ONNX export.
+    Export AirIMU model to ONNX format.
     
-    Usage examples:
-    
-    1. Export for single-sample inference (float32):
-       python export_onnx.py --seq-len 10
-    
-    2. Export for batch inference (float32):
-       python export_onnx.py --seq-len 1000
-    
-    3. Export with float64 (slower but maximum accuracy):
-       python export_onnx.py --seq-len 10 --fp64
+    You only need to specify the number of real IMU frames to process.
+    Padding frames are added automatically by the model.
     """
     parser = argparse.ArgumentParser(
-        description="Export AirIMU checkpoint to ONNX format for CPU deployment",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Export for single-sample real-time inference (RECOMMENDED)
-  python export_onnx.py --seq-len 10
-
-  # Export for batch processing
-  python export_onnx.py --seq-len 1000
-
-  # Export with maximum accuracy (slower)
-  python export_onnx.py --seq-len 10 --fp64
-
-Notes:
-  - seq-len must be >= 10 (9 padding + 1 real sample minimum)
-  - float32 is recommended (7.45e-08 error vs float64, 1.5-2x faster)
-  - ONNX model expects PRE-PADDED input (add 9 frames before inference)
-        """
+        description="Export AirIMU to ONNX with fixed input shape",
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
     # Model configuration
@@ -318,45 +261,32 @@ Notes:
                         help="Output path for ONNX model")
     parser.add_argument("--torch", 
                         default="experiments/EuRoC/codenet/airimu_cpu_fp32.pt",
-                        help="Output path for PyTorch state_dict")
+                        help="Output path for PyTorch weights")
     
-    # Export configuration
-    parser.add_argument("--seq-len", 
-                        type=int, 
-                        default=10,
-                        help="Dummy sequence length for export (must be >= 10 for interval=9)")
     parser.add_argument("--opset", 
                         type=int, 
                         default=17, 
-                        help="ONNX opset version (17 recommended for CPU)")
-    parser.add_argument("--fp64", 
-                        action="store_true",
-                        help="Export in float64 precision (default: float32, recommended for CPU)")
+                        help="ONNX opset version")
+    
+    parser.add_argument("--num-imu-frames",
+                        type=int,
+                        default=1,
+                        help="Number of real IMU frames to process (padding added automatically)")
     
     args = parser.parse_args()
     
-    # Validate seq_len
-    if args.seq_len < 10:
-        print(f"Warning: seq_len ({args.seq_len}) is less than minimum (10)")
-        print(f"         Setting seq_len to 10")
-        args.seq_len = 10
-    
     # Print configuration
     print("\n" + "="*70)
-    print("AirIMU ONNX Export Configuration")
+    print("AirIMU ONNX Export")
     print("="*70)
     print(f"Config:        {args.config}")
     print(f"Checkpoint:    {args.ckpt}")
-    print(f"Output ONNX:   {args.onnx}")
-    print(f"Output PyTorch: {args.torch}")
-    print(f"Sequence length: {args.seq_len}")
-    print(f"ONNX opset:    {args.opset}")
-    print(f"Precision:     {'float64' if args.fp64 else 'float32 (RECOMMENDED)'}")
+    print(f"Output:        {args.onnx}")
+    print(f"Opset:         {args.opset}")
+    print(f"IMU frames:    {args.num_imu_frames}")
     print("="*70 + "\n")
 
-    # Run export
-    export(args.config, args.ckpt, args.onnx, args.torch,
-           args.seq_len, args.opset, args.fp64)
+    export(args.config, args.ckpt, args.onnx, args.torch, args.opset, args.num_imu_frames)
 
 
 if __name__ == "__main__":
