@@ -35,7 +35,7 @@ def inference(network, loader, confs):
                 print(f"Expected window_size from config: {data.get('window_size', 'not in data')}")
                 if data['acc'].shape[1] > 1:
                     print(f"⚠️  PADDING DETECTED: Input has {data['acc'].shape[1]} samples (more than window_size)")
-                    print(f"   Padding amount: {data['acc'].shape[1] - 1} frames")
+                    print(f"   Padding amount: 9 frames")
                 else:
                     print(f"✓ No padding detected (or window_size matches input)")
                 print(f"===================================\n")
@@ -59,8 +59,8 @@ if __name__ == '__main__':
     parser.add_argument('--load', type=str, default=None, help='path for model check point')
     parser.add_argument("--device", type=str, default="cuda:0", help="cuda or cpu")
     parser.add_argument('--batch_size', type=int, default=1, help='batch size.')
-    parser.add_argument('--window_size', type=int, default=1, help='window size for sliding window')
-    parser.add_argument('--step_size', type=int, default=1, help='step size for sliding window')
+    parser.add_argument('--window_size', type=int, default=1000, help='window size for sliding window')
+    parser.add_argument('--step_size', type=int, default=1000, help='step size for sliding window')
     parser.add_argument('--train', default=False, action="store_true", help='if True, We will evaluate the training set (may be removed in the future).')
     parser.add_argument('--gtinit', default=True, action="store_false", help='if set False, we will use the integrated pose as the intial pose for the next integral')
     parser.add_argument('--whole', default=False, action="store_true", help='(may be removed in the future).')
@@ -194,7 +194,27 @@ if __name__ == '__main__':
             inference_state['corrected_gyro'] = eval_dataset.gyro[0] + inference_state['correction_gyro'].squeeze(0).cpu()
             inference_state['rot'] = eval_dataset.gt_ori[0]
             inference_state['dt'] = eval_dataset.dt[0]
+            inference_state['raw_acc'] = eval_dataset.acc[0]  # Save raw IMU data
+            inference_state['raw_gyro'] = eval_dataset.gyro[0]  # Save raw IMU data
             
+            print(f"\n--- Pickle Output for Sequence: {path} ---")
+            def print_arr(name, arr):
+                arr_np = arr.cpu().numpy() if hasattr(arr, 'cpu') else arr
+                print(f"{name} shape: {arr_np.shape}, dtype={arr_np.dtype}")
+                print(f"{name} first 3 values:")
+                print(arr_np[:3])
+
+            print_arr("Input acc", eval_dataset.acc[0])
+            print_arr("Input gyro", eval_dataset.gyro[0])
+            print_arr("Correction acc", inference_state['correction_acc'].squeeze(0))
+            print_arr("Correction gyro", inference_state['correction_gyro'].squeeze(0))
+            print_arr("Corrected acc", inference_state['corrected_acc'])
+            print_arr("Corrected gyro", inference_state['corrected_gyro'])
+            print_arr("Acc covariance", inference_state['acc_cov'])
+            print_arr("Gyro covariance", inference_state['gyro_cov'])
+            print_arr("GT orientation", inference_state['rot'])
+            print_arr("dt", inference_state['dt'])
+            print(f"--- End Pickle Output ---\n")
             net_out_result[path] = inference_state
 
             #### RPE and Cov analysis
