@@ -19,9 +19,16 @@ Outputs:
   
   - "corr_gyro": shape [batch=1, N, 3], dtype=float32
                  Correction for N real gyroscope samples (padding excluded)
+  
+  - "cov_acc":   shape [batch=1, N, 3], dtype=float32
+                 Covariance for N real accelerometer samples (zeros if disabled)
+  
+  - "cov_gyro":  shape [batch=1, N, 3], dtype=float32
+                 Covariance for N real gyroscope samples (zeros if disabled)
 
 Note: User must add 9 synthetic padding frames before calling ONNX model.
       See inference_onnx.py for padding implementation.
+      Covariance outputs are zeros if model was not trained with propcov=True.
 """
 import argparse
 import torch
@@ -78,6 +85,8 @@ class CodeNetWrapper(torch.nn.Module):
         Returns:
             correction_acc: [batch, seq_len-9, 3] corrections for real samples
             correction_gyro: [batch, seq_len-9, 3] corrections for real samples
+            cov_acc: [batch, seq_len-9, 3] covariance for acc (zeros if disabled)
+            cov_gyro: [batch, seq_len-9, 3] covariance for gyro (zeros if disabled)
         """
         # CRITICAL: Set model to eval mode and disable any dropout/batchnorm variations
         self.net.eval()
@@ -86,7 +95,21 @@ class CodeNetWrapper(torch.nn.Module):
         out = self.net.inference({"acc": acc, "gyro": gyro})
         
         # Extract corrections from dict output
-        return out["correction_acc"], out["correction_gyro"]
+        corr_acc = out["correction_acc"]
+        corr_gyro = out["correction_gyro"]
+        
+        # Extract covariance (use zeros if not available)
+        cov_state = out.get("cov_state", {})
+        cov_acc = cov_state.get("acc_cov")
+        cov_gyro = cov_state.get("gyro_cov")
+        
+        # If covariance is None, return zeros with same shape as corrections
+        if cov_acc is None:
+            cov_acc = torch.zeros_like(corr_acc)
+        if cov_gyro is None:
+            cov_gyro = torch.zeros_like(corr_gyro)
+        
+        return corr_acc, corr_gyro, cov_acc, cov_gyro
 
 
 def export(config: str, ckpt: str, onnx_path: str, torch_path: str,
@@ -153,8 +176,17 @@ def export(config: str, ckpt: str, onnx_path: str, torch_path: str,
     # Test wrapper before export to ensure it works
     print("\nTesting wrapper before export...")
     with torch.no_grad():
-        test_out_acc, test_out_gyro = wrapper(acc, gyro)
-    print(f"  ✓ Test passed - output shapes: {test_out_acc.shape}, {test_out_gyro.shape}")
+        test_out_acc, test_out_gyro, test_cov_acc, test_cov_gyro = wrapper(acc, gyro)
+    print(f"  ✓ Test passed - output shapes:")
+    print(f"    corrections: {test_out_acc.shape}, {test_out_gyro.shape}")
+    print(f"    covariance:  {test_cov_acc.shape}, {test_cov_gyro.shape}")
+    
+    # Check if covariance is enabled
+    has_cov = hasattr(net.conf, 'propcov') and net.conf.propcov
+    if has_cov:
+        print(f"  ✓ Covariance enabled (propcov=True)")
+    else:
+        print(f"  ℹ Covariance disabled - outputs will be zeros")
     
     # ============================================================================
     # EXPORT TO ONNX
@@ -165,7 +197,7 @@ def export(config: str, ckpt: str, onnx_path: str, torch_path: str,
         (acc, gyro),
         onnx_path,
         input_names=["acc", "gyro"],
-        output_names=["corr_acc", "corr_gyro"],
+        output_names=["corr_acc", "corr_gyro", "cov_acc", "cov_gyro"],
         opset_version=opset,
         do_constant_folding=True,
         training=torch.onnx.TrainingMode.EVAL,
@@ -197,21 +229,31 @@ def export(config: str, ckpt: str, onnx_path: str, torch_path: str,
         )
         
         # Compare ONNX output with PyTorch output
-        torch_outputs = [test_out_acc.numpy(), test_out_gyro.numpy()]
+        torch_outputs = [
+            test_out_acc.numpy(), 
+            test_out_gyro.numpy(),
+            test_cov_acc.numpy(),
+            test_cov_gyro.numpy()
+        ]
         
         diff_acc = abs(onnx_outputs[0] - torch_outputs[0]).max()
         diff_gyro = abs(onnx_outputs[1] - torch_outputs[1]).max()
+        diff_cov_acc = abs(onnx_outputs[2] - torch_outputs[2]).max()
+        diff_cov_gyro = abs(onnx_outputs[3] - torch_outputs[3]).max()
         
-        print(f"  Max difference (acc):  {diff_acc:.2e}")
-        print(f"  Max difference (gyro): {diff_gyro:.2e}")
+        print(f"  Max difference (corr_acc):  {diff_acc:.2e}")
+        print(f"  Max difference (corr_gyro): {diff_gyro:.2e}")
+        print(f"  Max difference (cov_acc):   {diff_cov_acc:.2e}")
+        print(f"  Max difference (cov_gyro):  {diff_cov_gyro:.2e}")
         
         # Check if differences are acceptable for fp32
         threshold = 1e-4
+        max_diff = max(diff_acc, diff_gyro, diff_cov_acc, diff_cov_gyro)
         
-        if diff_acc < threshold and diff_gyro < threshold:
-            print("  ✓ ONNX export verified - outputs match PyTorch!")
+        if max_diff < threshold:
+            print("  ✓ ONNX export verified - all outputs match PyTorch!")
         else:
-            print(f"  ⚠️  Differences detected - acc: {diff_acc:.2e}, gyro: {diff_gyro:.2e}")
+            print(f"  ⚠️  Max difference detected: {max_diff:.2e}")
             
     except ImportError:
         print("\n⚠️  onnxruntime not installed - skipping verification")
@@ -227,8 +269,12 @@ def export(config: str, ckpt: str, onnx_path: str, torch_path: str,
     print("="*70)
     print(f"\nONNX Model:")
     print(f"  Precision: float32")
-    print(f"  Input:  [1, {total_seq_len}, 3] ({num_imu_frames} real + {padding_frames} padding)")
-    print(f"  Output: [1, {num_imu_frames}, 3]")
+    print(f"  Inputs:  [1, {total_seq_len}, 3] ({num_imu_frames} real + {padding_frames} padding)")
+    print(f"  Outputs: [1, {num_imu_frames}, 3] x 4")
+    print(f"    - corr_acc:  IMU correction for accelerometer")
+    print(f"    - corr_gyro: IMU correction for gyroscope")
+    print(f"    - cov_acc:   Covariance for accelerometer")
+    print(f"    - cov_gyro:  Covariance for gyroscope")
     print(f"\nFiles:")
     print(f"  ONNX:    {onnx_path}")
     print(f"  PyTorch: {torch_path}")

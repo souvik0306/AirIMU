@@ -94,8 +94,8 @@ def inference(onnx_session, loader, confs, interval=9, torch_net=None, verbose=F
             gyro_np = gyro_padded.cpu().numpy().astype(np_dtype)
             
             # Run ONNX inference
-            # Input: [batch, expected_seq_len, 3] -> Output: [batch, expected_seq_len-interval, 3]
-            corr_acc_full, corr_gyro_full = onnx_session.run(
+            # Input: [batch, expected_seq_len, 3] -> Output: 4x [batch, expected_seq_len-interval, 3]
+            corr_acc_full, corr_gyro_full, cov_acc_full, cov_gyro_full = onnx_session.run(
                 None,  # Return all outputs
                 {"acc": acc_np, "gyro": gyro_np}
             )
@@ -103,6 +103,8 @@ def inference(onnx_session, loader, confs, interval=9, torch_net=None, verbose=F
             # Trim output to actual number of real frames (remove extra padding)
             corr_acc = corr_acc_full[:, :actual_real_frames, :]
             corr_gyro = corr_gyro_full[:, :actual_real_frames, :]
+            cov_acc = cov_acc_full[:, :actual_real_frames, :]
+            cov_gyro = cov_gyro_full[:, :actual_real_frames, :]
 
             # Optional debug: compare ONNX output with PyTorch model on first batch
             if (torch_net is not None) and (not compare_done):
@@ -124,16 +126,35 @@ def inference(onnx_session, loader, confs, interval=9, torch_net=None, verbose=F
 
                     pt_corr_acc = pt_out['correction_acc'].cpu().numpy()
                     pt_corr_gyro = pt_out['correction_gyro'].cpu().numpy()
+                    
+                    # Get covariance from cov_state (may be None)
+                    cov_state = pt_out.get('cov_state', {})
+                    pt_cov_acc = cov_state.get('acc_cov')
+                    pt_cov_gyro = cov_state.get('gyro_cov')
+                    if pt_cov_acc is not None:
+                        pt_cov_acc = pt_cov_acc.cpu().numpy()
+                    if pt_cov_gyro is not None:
+                        pt_cov_gyro = pt_cov_gyro.cpu().numpy()
 
                     onnx_acc = corr_acc
                     onnx_gyro = corr_gyro
 
                     diff_acc = np.max(np.abs(onnx_acc - pt_corr_acc))
                     diff_gyro = np.max(np.abs(onnx_gyro - pt_corr_gyro))
-                    print(f"\n[DEBUG] First-batch ONNX vs PyTorch max abs diff - acc: {diff_acc:.3e}, gyro: {diff_gyro:.3e}")
+                    print(f"\n[DEBUG] First-batch ONNX vs PyTorch max abs diff:")
+                    print(f"  Corrections - acc: {diff_acc:.3e}, gyro: {diff_gyro:.3e}")
+                    
+                    # Compare covariance if available
+                    if pt_cov_acc is not None and pt_cov_gyro is not None:
+                        diff_cov_acc = np.max(np.abs(cov_acc - pt_cov_acc))
+                        diff_cov_gyro = np.max(np.abs(cov_gyro - pt_cov_gyro))
+                        print(f"  Covariance  - acc: {diff_cov_acc:.3e}, gyro: {diff_cov_gyro:.3e}")
+                    else:
+                        print(f"  Covariance  - not enabled in model (outputs are zeros)")
+                    
                     if verbose:
-                        print(f"  ONNX acc shape: {onnx_acc.shape}, PyTorch acc shape: {pt_corr_acc.shape}")
-                        print(f"  ONNX gyro shape: {onnx_gyro.shape}, PyTorch gyro shape: {pt_corr_gyro.shape}")
+                        print(f"  ONNX shapes: acc={onnx_acc.shape}, gyro={onnx_gyro.shape}")
+                        print(f"  PyTorch shapes: acc={pt_corr_acc.shape}, gyro={pt_corr_gyro.shape}")
                 except Exception as e:
                     print(f"[DEBUG] PyTorch comparison failed: {e}")
                 compare_done = True
@@ -141,7 +162,9 @@ def inference(onnx_session, loader, confs, interval=9, torch_net=None, verbose=F
             # Convert back to torch tensors (always use float64 for downstream processing)
             inte_state = {
                 'correction_acc': torch.from_numpy(corr_acc.astype(np.float64)),
-                'correction_gyro': torch.from_numpy(corr_gyro.astype(np.float64))
+                'correction_gyro': torch.from_numpy(corr_gyro.astype(np.float64)),
+                'acc_cov': torch.from_numpy(cov_acc.astype(np.float64)),
+                'gyro_cov': torch.from_numpy(cov_gyro.astype(np.float64))
             }
             
             # Save state (accumulate across batches)
@@ -297,12 +320,6 @@ if __name__ == '__main__':
             for k, v in inference_state.items():
                 if hasattr(v, 'shape'):
                     print(f"  {k}: shape={v.shape}, dtype={v.dtype}")
-
-            # Add covariance placeholders if not present
-            if "acc_cov" not in inference_state.keys():
-                inference_state["acc_cov"] = torch.zeros_like(inference_state["correction_acc"])
-            if "gyro_cov" not in inference_state.keys():
-                inference_state["gyro_cov"] = torch.zeros_like(inference_state["correction_gyro"])
             
             # Apply corrections to original IMU data
             inference_state['corrected_acc'] = eval_dataset.acc[0] + inference_state['correction_acc'].squeeze(0).cpu()
