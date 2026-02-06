@@ -53,7 +53,9 @@ Download the SubT-MRS dataset: [Download](https://github.com/sleepycan/AirIMU/re
 
 Easy way to start the training using the exisiting configuration.
 
-> **Note**:You can also create your own configuration file for different datasets and set the parameters accordingly.
+> **Note**: You can also create your own configuration file for different datasets and set the parameters accordingly.
+
+> **Training Mode**: Set `propcov = false` in your training config if you wish to train **only for IMU corrections** without covariance learning. Set `propcov = true` to enable uncertainty propagation and train the model to predict both corrections and per-sample covariance estimates.
 
 ```
 python train.py --config configs/exp/EuRoC/codenet.conf
