@@ -73,7 +73,6 @@ def inference(onnx_session, loader, confs, interval=9, torch_net=None, verbose=F
                 if data['acc'].shape[1] > 1:
                     print(f"✓ PADDING DETECTED: Input has {data['acc'].shape[1]} samples")
                 print(f"===================================\n")
-                first_batch = False
             
             # Get actual sequence length from batch
             actual_seq_len = data['acc'].shape[1]
@@ -105,6 +104,19 @@ def inference(onnx_session, loader, confs, interval=9, torch_net=None, verbose=F
             corr_gyro = corr_gyro_full[:, :actual_real_frames, :]
             cov_acc = cov_acc_full[:, :actual_real_frames, :]
             cov_gyro = cov_gyro_full[:, :actual_real_frames, :]
+
+            # Print first batch covariance values to understand the range
+            if first_batch:
+                tqdm.tqdm.write(f"\n=== Covariance Output Range (First Batch, First 10 Samples) ===")
+                num_samples = min(10, actual_real_frames)
+                tqdm.tqdm.write(f"cov_acc (first {num_samples} samples):")
+                for i in range(num_samples):
+                    tqdm.tqdm.write(f"  [{i}]: {cov_acc[0, i, :]}")
+                tqdm.tqdm.write(f"\ncov_gyro (first {num_samples} samples):")
+                for i in range(num_samples):
+                    tqdm.tqdm.write(f"  [{i}]: {cov_gyro[0, i, :]}")
+                tqdm.tqdm.write(f"===================================\n")
+                first_batch = False
 
             # Optional debug: compare ONNX output with PyTorch model on first batch
             if (torch_net is not None) and (not compare_done):
