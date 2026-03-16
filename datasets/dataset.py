@@ -77,17 +77,53 @@ class SeqDataset(Data.Dataset):
 
 
 class SeqInfDataset(SeqDataset):
+    @staticmethod
+    def _as_time_series(tensor):
+        # Accept [T, C] or [1, T, C] and return [T, C].
+        if tensor.dim() == 3 and tensor.shape[0] == 1:
+            return tensor[0]
+        return tensor
+
+    @staticmethod
+    def _align_series_length(tensor, target_len, name):
+        cur_len = tensor.shape[0]
+        if cur_len == target_len:
+            return tensor
+        if cur_len > target_len:
+            print(f"[SeqInfDataset] Trimming {name} from {cur_len} to {target_len}")
+            return tensor[:target_len]
+        if cur_len <= 0:
+            raise ValueError(f"{name} is empty and cannot be aligned to target length {target_len}")
+
+        repeat_factor = int(np.ceil(target_len / cur_len))
+        print(f"[SeqInfDataset] Expanding {name} from {cur_len} to {target_len} using repeat factor {repeat_factor}")
+        return tensor.repeat_interleave(repeat_factor, dim=0)[:target_len]
+
     def __init__(self, root, dataname, inference_state, device =  'cpu', name='Nav', duration=200, step_size=200, 
                             drop_last = True, mode='inference', usecov = True, useraw = False,conf={}):
         super().__init__(root, dataname, device, name, duration, step_size, mode, drop_last, conf)
-        self.data['acc'][:-1] += inference_state['correction_acc'].cpu()[0]
-        self.data['gyro'][:-1] += inference_state['correction_gyro'].cpu()[0]
+        target_imu_len = self.data['acc'][:-1].shape[0]
+
+        correction_acc = self._as_time_series(inference_state['correction_acc'].cpu())
+        correction_gyro = self._as_time_series(inference_state['correction_gyro'].cpu())
+
+        correction_acc = self._align_series_length(correction_acc, target_imu_len, 'correction_acc')
+        correction_gyro = self._align_series_length(correction_gyro, target_imu_len, 'correction_gyro')
+
+        self.data['acc'][:-1] += correction_acc.to(self.data['acc'].dtype)
+        self.data['gyro'][:-1] += correction_gyro.to(self.data['gyro'].dtype)
        
         if 'acc_cov' in inference_state.keys() and usecov:
-            self.data['acc_cov'] = inference_state['acc_cov'][0]
+            target_full_len = self.data['acc'].shape[0]
+            acc_cov = self._as_time_series(inference_state['acc_cov'].cpu())
+            acc_cov = self._align_series_length(acc_cov, target_full_len, 'acc_cov')
+            self.data['acc_cov'] = acc_cov.to(self.data['acc'].dtype)
 
         if 'gyro_cov' in inference_state.keys() and usecov:
-            self.data['gyro_cov'] = inference_state['gyro_cov'][0]
+            target_full_len = self.data['gyro'].shape[0]
+            gyro_cov = self._as_time_series(inference_state['gyro_cov'].cpu())
+            gyro_cov = self._align_series_length(gyro_cov, target_full_len, 'gyro_cov')
+            self.data['gyro_cov'] = gyro_cov.to(self.data['gyro'].dtype)
 
 
 class SeqeuncesDataset(Data.Dataset):
@@ -96,7 +132,7 @@ class SeqeuncesDataset(Data.Dataset):
     1. Abandon the features of the last time frame, since there are no ground truth pose and dt
      to integrate the imu data of the last frame. So the length of the dataset is seq.get_length() - 1
     """
-    def __init__(self, data_set_config, mode = None, data_path = None, data_root = None, device= "cuda:0"):
+    def __init__(self, data_set_config, mode = None, data_path = None, data_root = None, device= "cuda:0", n_freq=1, n_mode="interval"):
         super(SeqeuncesDataset, self).__init__()
         (
             self.ts,
@@ -113,6 +149,8 @@ class SeqeuncesDataset(Data.Dataset):
         self.device = device
         self.conf = data_set_config
         self.gravity = data_set_config.gravity if "gravity" in data_set_config.keys() else 9.81007
+        self.n_freq = max(1, int(n_freq))
+        self.n_mode = (n_mode or "interval").lower()
         if mode is None:
             self.mode = data_set_config.mode
         else:
@@ -136,16 +174,132 @@ class SeqeuncesDataset(Data.Dataset):
             self.construct_index_map(conf, data_root, data_path, self.seq_idx)
             self.seq_idx += 1
 
+    def _block_mean(self, tensor, block_size):
+        chunks = [
+            tensor[i : i + block_size].mean(dim=0, keepdim=True)
+            for i in range(0, tensor.shape[0], block_size)
+        ]
+        return torch.cat(chunks, dim=0)
+
+    def _use_frequency_mode(self):
+        return self.n_freq > 1 and self.mode in {"inference", "infevaluate", "evaluate"}
+
+    def _effective_length(self, length):
+        if not self._use_frequency_mode():
+            return int(length)
+        return int(np.ceil(length / self.n_freq))
+
+    def _quat_block_mean(self, quat, block_size):
+        quat_mean = self._block_mean(quat, block_size)
+        quat_norm = torch.linalg.norm(quat_mean, dim=-1, keepdim=True).clamp_min(1e-12)
+        return quat_mean / quat_norm
+
+    def _sync_lengths(self, dt, acc, gyro, gt_pos, gt_ori, gt_velo, ref_dt_last, ref_gt_pos_last, ref_gt_ori_last, ref_gt_velo_last):
+        imu_target = acc.shape[0]
+        gt_target = imu_target + 1
+        dt_target = imu_target + 1
+
+        if gt_pos.shape[0] < gt_target:
+            pad_count = gt_target - gt_pos.shape[0]
+            gt_pos = torch.cat([gt_pos, ref_gt_pos_last.repeat(pad_count, *([1] * (ref_gt_pos_last.dim() - 1)))], dim=0)
+            gt_ori = torch.cat([gt_ori, ref_gt_ori_last.repeat(pad_count, *([1] * (ref_gt_ori_last.dim() - 1)))], dim=0)
+            gt_velo = torch.cat([gt_velo, ref_gt_velo_last.repeat(pad_count, *([1] * (ref_gt_velo_last.dim() - 1)))], dim=0)
+        else:
+            gt_pos = gt_pos[:gt_target]
+            gt_ori = gt_ori[:gt_target]
+            gt_velo = gt_velo[:gt_target]
+
+        if dt.shape[0] < dt_target:
+            pad_count = dt_target - dt.shape[0]
+            dt = torch.cat([dt, ref_dt_last.repeat(pad_count, *([1] * (ref_dt_last.dim() - 1)))], dim=0)
+        else:
+            dt = dt[:dt_target]
+
+        return dt, acc, gyro, gt_pos, gt_ori, gt_velo
+
+    def _apply_frequency_mode(self, dt, acc, gyro, gt_pos, gt_ori, gt_velo):
+        if not self._use_frequency_mode():
+            return dt, acc, gyro, gt_pos, gt_ori, gt_velo
+
+        mode = self.n_mode
+        if mode not in {"interval", "avg", "average"}:
+            raise ValueError(f"Unsupported n_mode={self.n_mode}. Use 'interval' or 'avg'.")
+
+        ref_dt_last = dt[-1:]
+        ref_gt_pos_last = gt_pos[-1:]
+        ref_gt_ori_last = gt_ori[-1:]
+        ref_gt_velo_last = gt_velo[-1:]
+
+        if mode == "interval":
+            imu_idx = torch.arange(0, acc.shape[0], self.n_freq, device=acc.device)
+            state_idx = torch.cat([
+                imu_idx,
+                torch.tensor([acc.shape[0]], device=acc.device, dtype=imu_idx.dtype),
+            ])
+
+            acc = acc.index_select(0, imu_idx)
+            gyro = gyro.index_select(0, imu_idx)
+            gt_pos = gt_pos.index_select(0, state_idx.clamp_max(gt_pos.shape[0] - 1))
+            gt_ori = gt_ori.index_select(0, state_idx.clamp_max(gt_ori.shape[0] - 1))
+            gt_velo = gt_velo.index_select(0, state_idx.clamp_max(gt_velo.shape[0] - 1))
+
+            dt_steps = []
+            for i in range(state_idx.shape[0] - 1):
+                s = int(state_idx[i].item())
+                e = int(state_idx[i + 1].item())
+                dt_steps.append(dt[s:e].sum(dim=0, keepdim=True))
+            dt = torch.cat(dt_steps + [dt_steps[-1].clone()], dim=0)
+        else:
+            acc = self._block_mean(acc, self.n_freq)
+            gyro = self._block_mean(gyro, self.n_freq)
+            gt_pos = self._block_mean(gt_pos, self.n_freq)
+            gt_ori = self._quat_block_mean(gt_ori, self.n_freq)
+            gt_velo = self._block_mean(gt_velo, self.n_freq)
+
+            dt_steps = self._block_mean(dt[:-1], self.n_freq)
+            dt = torch.cat([dt_steps, dt_steps[-1:].clone()], dim=0)
+
+        return self._sync_lengths(
+            dt,
+            acc,
+            gyro,
+            gt_pos,
+            gt_ori,
+            gt_velo,
+            ref_dt_last,
+            ref_gt_pos_last,
+            ref_gt_ori_last,
+            ref_gt_velo_last,
+        )
+
     def load_data(self, seq, start_frame, end_frame):
+        dt = seq.data["dt"][start_frame:end_frame+1]
+        acc = seq.data["acc"][start_frame:end_frame]
+        gyro = seq.data["gyro"][start_frame:end_frame]
+        gt_pos = seq.data["gt_translation"][start_frame:end_frame+1]
+        gt_ori = seq.data["gt_orientation"][start_frame:end_frame+1]
+        gt_velo = seq.data["velocity"][start_frame:end_frame+1]
+
+        dt, acc, gyro, gt_pos, gt_ori, gt_velo = self._apply_frequency_mode(
+            dt, acc, gyro, gt_pos, gt_ori, gt_velo
+        )
+
         if "time" in seq.data.keys():
-            self.ts.append(seq.data["time"][start_frame:end_frame])
-        self.acc.append(seq.data["acc"][start_frame:end_frame])
-        self.gyro.append(seq.data["gyro"][start_frame:end_frame])
+            ts = seq.data["time"][start_frame:end_frame]
+            if self.n_freq > 1:
+                if self.n_mode == "interval":
+                    ts = ts[:: self.n_freq]
+                elif self.n_mode in {"avg", "average"}:
+                    ts = self._block_mean(ts, self.n_freq)
+            self.ts.append(ts)
+
+        self.acc.append(acc)
+        self.gyro.append(gyro)
         # the groud truth state should include the init state and integrated state, thus has one more frame than imu data
-        self.dt.append(seq.data["dt"][start_frame:end_frame+1])
-        self.gt_pos.append(seq.data["gt_translation"][start_frame:end_frame+1])
-        self.gt_ori.append(seq.data["gt_orientation"][start_frame:end_frame+1])
-        self.gt_velo.append(seq.data["velocity"][start_frame:end_frame+1])
+        self.dt.append(dt)
+        self.gt_pos.append(gt_pos)
+        self.gt_ori.append(gt_ori)
+        self.gt_velo.append(gt_velo)
 
     def construct_index_map(self, conf, data_root, data_name, seq_id):
         seq = self.DataClass[conf.name](data_root, data_name, intepolate = True, **self.conf)
@@ -166,24 +320,32 @@ class SeqeuncesDataset(Data.Dataset):
             end_frame = 1000
 
         _duration = end_frame - start_frame
+        effective_duration = self._effective_length(_duration)
+        effective_window = max(1, self._effective_length(window_size))
+        effective_step = max(1, self._effective_length(step_size))
+
         if self.mode == "inference":
-            window_size = seq_len
-            step_size = seq_len
-            self.index_map = [[seq_id, 0, seq_len]]
+            self.index_map = [[seq_id, 0, effective_duration]]
         elif self.mode == "infevaluate":
-            self.index_map +=[
-                [seq_id, j, j+window_size] for j in range(
-                    0, _duration - window_size, step_size)
+            windows = [
+                [seq_id, j, j+effective_window] for j in range(
+                    0, effective_duration - effective_window, effective_step)
             ]
-            if self.index_map[-1][2] < _duration:
+            if not windows:
+                windows = [[seq_id, 0, effective_duration]]
+            self.index_map += windows
+            if self.index_map and self.index_map[-1][2] < effective_duration:
                 print(self.index_map[-1][2])
-                self.index_map += [[seq_id, self.index_map[-1][2], seq_len]]
+                self.index_map += [[seq_id, self.index_map[-1][2], effective_duration]]
         elif self.mode == 'evaluate':
             # adding the last piece for evaluation
-            self.index_map +=[
-                [seq_id, j, j+window_size] for j in range(
-                    0, _duration - window_size, step_size)
+            windows = [
+                [seq_id, j, j+effective_window] for j in range(
+                    0, effective_duration - effective_window, effective_step)
             ]
+            if not windows:
+                windows = [[seq_id, 0, effective_duration]]
+            self.index_map += windows
         elif self.mode == 'train_half_random':
             np.random.seed(1)   
             window_group_size = 3000

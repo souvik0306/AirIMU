@@ -1,5 +1,33 @@
 import torch
 
+
+def _quat_conj_xyzw(q):
+    return torch.cat([-q[..., :3], q[..., 3:4]], dim=-1)
+
+
+def _quat_rotate_xyzw(q, v):
+    # q is expected as [x, y, z, w]. Rotate vector v by quaternion q.
+    q = q / torch.linalg.norm(q, dim=-1, keepdim=True).clamp_min(1e-12)
+    q_xyz = q[..., :3]
+    q_w = q[..., 3:4]
+    t = 2.0 * torch.cross(q_xyz, v, dim=-1)
+    return v + q_w * t + torch.cross(q_xyz, t, dim=-1)
+
+
+def _rotate_world_to_body(init_rot, world_vec):
+    # PyPose LieTensor path.
+    if hasattr(init_rot, "Inv"):
+        return init_rot.Inv() * world_vec
+
+    # Tensor quaternion path: init_rot [...,4] with [qx,qy,qz,qw].
+    if not torch.is_tensor(init_rot):
+        raise TypeError(f"Unsupported rotation type: {type(init_rot)}")
+    if init_rot.shape[-1] != 4:
+        raise ValueError(f"Expected quaternion last dim=4, got {init_rot.shape}")
+
+    q_inv = _quat_conj_xyzw(init_rot)
+    return _quat_rotate_xyzw(q_inv, world_vec)
+
 def imu_seq_collate(data):
     acc = torch.stack([d['acc'] for d in data])
     gyro = torch.stack([d['gyro'] for d in data])
@@ -85,7 +113,7 @@ def padding_collate(data, pad_len = 1, use_gravity = True):
     else:
         iden_acc_vector = torch.zeros(B, pad_len, 3, dtype=input_data['dt'].dtype)
 
-    pad_acc = init_state['rot'].Inv() * iden_acc_vector
+    pad_acc = _rotate_world_to_body(init_state['rot'], iden_acc_vector)
     pad_gyro = torch.zeros(B, pad_len, 3, dtype=input_data['dt'].dtype)
     
     # Print padding details for EVERY window

@@ -61,6 +61,8 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=1, help='batch size.')
     parser.add_argument('--window_size', type=int, default=1000, help='window size for sliding window')
     parser.add_argument('--step_size', type=int, default=1000, help='step size for sliding window')
+    parser.add_argument('--n_freq', type=int, default=1, help='frequency factor N for interval/avg processing')
+    parser.add_argument('--n_mode', type=str, default='interval', choices=['interval', 'avg'], help='frequency mode: interval or avg')
     parser.add_argument('--train', default=False, action="store_true", help='if True, We will evaluate the training set (may be removed in the future).')
     parser.add_argument('--gtinit', default=True, action="store_false", help='if set False, we will use the integrated pose as the intial pose for the next integral')
     parser.add_argument('--whole', default=False, action="store_true", help='(may be removed in the future).')
@@ -101,6 +103,7 @@ if __name__ == '__main__':
     
     print(conf.dataset)
     dataset_conf = conf.dataset.inference
+    print(f"Frequency settings -> n_freq: {args.n_freq}, n_mode: {args.n_mode}")
 
     '''
     Run and save the IMU correction
@@ -118,7 +121,13 @@ if __name__ == '__main__':
                 dataset_conf["mode"] = "infevaluate"
             dataset_conf["exp_dir"] = conf.general.exp_dir
             print("\n"*3 + str(dataset_conf))
-            eval_dataset = SeqeuncesDataset(data_set_config=dataset_conf, data_path=path, data_root=data_conf["data_root"])
+            eval_dataset = SeqeuncesDataset(
+                data_set_config=dataset_conf,
+                data_path=path,
+                data_root=data_conf["data_root"],
+                n_freq=args.n_freq,
+                n_mode=args.n_mode,
+            )
             eval_loader = Data.DataLoader(dataset=eval_dataset, batch_size=args.batch_size, 
                                             shuffle=False, collate_fn=collate_fn, drop_last = False)
 
