@@ -103,6 +103,8 @@ class Euroc(Sequence):
             self.data['acc'] = self.data["gt_orientation"] * self.data['acc']
 
         print("loaded: ", data_path, "calib: ", calib, "interpolate: ", intepolate)
+        if "MH_02_easy" in data_name:
+            self._debug_print_first_rows(data_name, rows=10)
 
     def get_length(self):
         return self.data['time'].shape[0]
@@ -144,4 +146,59 @@ class Euroc(Sequence):
 
         inte_xyz = np.stack([intep_x, intep_y, intep_z]).transpose()
         return torch.tensor(inte_xyz)
+
+    def _debug_print_first_rows(self, data_name, rows=10):
+        acc = self.data["acc"]
+        gyro = self.data["gyro"]
+        pos = self.data["gt_translation"]
+        vel = self.data["velocity"]
+        dt = self.data["dt"]
+        rot = self.data["gt_orientation"]
+
+        acc_np = acc.detach().cpu().numpy()
+        gyro_np = gyro.detach().cpu().numpy()
+        pos_np = pos.detach().cpu().numpy()
+        vel_np = vel.detach().cpu().numpy()
+        dt_np = dt.detach().cpu().numpy()
+        if hasattr(rot, "tensor"):
+            rot_np = rot.tensor().detach().cpu().numpy()
+        else:
+            rot_np = torch.as_tensor(rot).detach().cpu().numpy()
+
+        n = min(rows, acc_np.shape[0], gyro_np.shape[0], pos_np.shape[0], vel_np.shape[0], rot_np.shape[0])
+        ndt = min(rows, dt_np.shape[0])
+
+        print("\nMH_02_easy debug samples:", data_name)
+        print("Inputs (first %d):" % n)
+        print("columns: idx, dt, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, rot_qx, rot_qy, rot_qz, rot_qw")
+        for i in range(n):
+            if i < ndt:
+                dt_val = dt_np[i][0] if dt_np.ndim > 1 else dt_np[i]
+            else:
+                dt_val = float("nan")
+            r = rot_np[i]
+            print(
+                "%04d, %.9f, %.9f, %.9f, %.9f, %.9f, %.9f, %.9f, %.9f, %.9f, %.9f, %.9f"
+                % (
+                    i,
+                    dt_val,
+                    acc_np[i, 0], acc_np[i, 1], acc_np[i, 2],
+                    gyro_np[i, 0], gyro_np[i, 1], gyro_np[i, 2],
+                    r[0], r[1], r[2], r[3],
+                )
+            )
+
+        print("Outputs (first %d):" % n)
+        print("columns: idx, gt_pos_x, gt_pos_y, gt_pos_z, gt_rot_qx, gt_rot_qy, gt_rot_qz, gt_rot_qw, gt_vel_x, gt_vel_y, gt_vel_z")
+        for i in range(n):
+            r = rot_np[i]
+            print(
+                "%04d, %.9f, %.9f, %.9f, %.9f, %.9f, %.9f, %.9f, %.9f, %.9f, %.9f"
+                % (
+                    i,
+                    pos_np[i, 0], pos_np[i, 1], pos_np[i, 2],
+                    r[0], r[1], r[2], r[3],
+                    vel_np[i, 0], vel_np[i, 1], vel_np[i, 2],
+                )
+            )
 
