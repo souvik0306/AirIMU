@@ -2,3 +2,6 @@
 *.pt
 plot_files/*
 junk/*
+review_files/*
+*.csv
+*.DS_Store
