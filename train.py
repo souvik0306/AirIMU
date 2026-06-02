@@ -112,6 +112,31 @@ def write_wandb(header, objs, epoch_i):
         wandb.log({header: objs}, step = epoch_i)
 
 
+def log_used_data_paths(conf):
+    if wandb.run is None:
+        return
+
+    columns = ["split", "dataset", "data_root", "data_drive", "path", "mode", "window_size", "step_size"]
+    table = wandb.Table(columns=columns)
+    used_paths = {}
+
+    for split, split_conf in (("train", conf.dataset.train), ("test", conf.dataset.test), ("eval", conf.dataset.eval)):
+        used_paths[split] = []
+        for data_conf in split_conf.data_list:
+            data_root = str(data_conf["data_root"])
+            for drive in data_conf.data_drive:
+                data_drive = str(drive)
+                path = os.path.normpath(os.path.join(data_root, data_drive))
+                used_paths[split].append(path)
+                table.add_data(
+                    split, data_conf.name, data_root, data_drive, path,
+                    split_conf.mode, data_conf.window_size, data_conf.step_size,
+                )
+
+    wandb.config.update({"used_data_paths": used_paths}, allow_val_change=True)
+    wandb.log({"data/used_paths": table})
+
+
 def save_ckpt(network, optimizer, scheduler, epoch_i, test_loss, conf, save_best = False):
     if epoch_i%conf.train.save_freq==conf.train.save_freq-1:
         torch.save({
@@ -124,14 +149,24 @@ def save_ckpt(network, optimizer, scheduler, epoch_i, test_loss, conf, save_best
 
     if save_best:
         print("saving the best model", test_loss)
+        best_ckpt_path = os.path.join(conf.general.exp_dir, "ckpt/best_model.ckpt")
         torch.save({
         'epoch': epoch_i,
         'model_state_dict': network.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'best_loss': test_loss,
-        }, os.path.join(conf.general.exp_dir, "ckpt/best_model.ckpt"))
-    
+        }, best_ckpt_path)
+
+        if wandb.run is not None:
+            artifact = wandb.Artifact(
+                name=f"{wandb.run.name}-best-model",
+                type="model",
+                metadata={"epoch": epoch_i, "best_loss": test_loss},
+            )
+            artifact.add_file(best_ckpt_path)
+            wandb.log_artifact(artifact, aliases=["best", "latest"])
+
     torch.save({
         'epoch': epoch_i,
         'model_state_dict': network.state_dict(),
@@ -139,7 +174,6 @@ def save_ckpt(network, optimizer, scheduler, epoch_i, test_loss, conf, save_best
         'scheduler_state_dict': scheduler.state_dict(),
         'best_loss': test_loss,
         }, os.path.join(conf.general.exp_dir, "ckpt/newest.ckpt"))
-        
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -181,6 +215,7 @@ if __name__ == '__main__':
                     config= conf.train, 
                     group = conf.train.network, 
                     name  = conf_name,)
+        log_used_data_paths(conf)
 
     ## optimizer
     network = net_dict[conf.train.network](conf.train).to(device = args.device, dtype = train_dataset.get_dtype())
