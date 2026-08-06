@@ -241,20 +241,13 @@ class TLab(Sequence):
         return rot
 
     def update_coordinate(self, coordinate, mode):
-        """Match EuRoC behavior for global/body-coordinate training targets."""
+        """Match EuRoC behavior for optional global-coordinate training targets."""
         if coordinate is None:
             return
         try:
             if coordinate == "glob_coord":
                 self.data["gyro"] = self.data["gt_orientation"] @ self.data["gyro"]
                 self.data["acc"] = self.data["gt_orientation"] @ self.data["acc"]
- # body_coord already converts velocity from world to body frame, so no additional transformation is needed
-            elif coordinate == "body_coord":
-                self.g_vector = self.data["gt_orientation"].Inv() @ self.g_vector
-                if mode != "infevaluate" and mode != "inference":
-                    self.data["velocity"] = (
-                        self.data["gt_orientation"].Inv() @ self.data["velocity"]
-                    )
             else:
                 raise ValueError(f"Unsupported coordinate system: {coordinate}")
         except Exception as e:
