@@ -38,6 +38,7 @@ class TLab(Sequence):
         self.load_imu(data_path)
         self.load_gt(data_path)
         self.align_all_to_euroc_frame()
+        self.remove_initial_position_offset()
         self.use_aligned_ground_truth()
 
         self.data["time"] = torch.tensor(self.data["time"], dtype=torch.double)
@@ -172,6 +173,12 @@ class TLab(Sequence):
         self.align_orientation_to_euroc_frame()
         # self.align_position_to_euroc_frame() ## AirIMU requires GT position in TLab frame, so we don't align it to EuRoC frame.
         # self.align_velocity_to_euroc_frame() ## AirIMU requires GT velocity in TLab frame, so we don't align it to EuRoC frame.
+
+    def remove_initial_position_offset(self):
+        """Shift GT positions so the first sample becomes the origin."""
+        if self.data["pos"].shape[0] == 0:
+            raise ValueError(f"No GT position samples found in {self.data_name}.")
+        self.data["pos"] = self.data["pos"] - self.data["pos"][0]
 
     def use_aligned_ground_truth(self):
         """Use GT directly because TLab IMU and GT rows are already time-aligned."""
