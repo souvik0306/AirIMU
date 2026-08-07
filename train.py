@@ -158,15 +158,6 @@ def save_ckpt(network, optimizer, scheduler, epoch_i, test_loss, conf, save_best
         'best_loss': test_loss,
         }, best_ckpt_path)
 
-        if wandb.run is not None:
-            artifact = wandb.Artifact(
-                name=f"{wandb.run.name}-best-model",
-                type="model",
-                metadata={"epoch": epoch_i, "best_loss": test_loss},
-            )
-            artifact.add_file(best_ckpt_path)
-            wandb.log_artifact(artifact, aliases=["best", "latest"])
-
     torch.save({
         'epoch': epoch_i,
         'model_state_dict': network.state_dict(),
@@ -174,6 +165,25 @@ def save_ckpt(network, optimizer, scheduler, epoch_i, test_loss, conf, save_best
         'scheduler_state_dict': scheduler.state_dict(),
         'best_loss': test_loss,
         }, os.path.join(conf.general.exp_dir, "ckpt/newest.ckpt"))
+
+
+def upload_best_ckpt_artifact(conf, best_loss):
+    if wandb.run is None:
+        return
+
+    best_ckpt_path = os.path.join(conf.general.exp_dir, "ckpt/best_model.ckpt")
+    if not os.path.isfile(best_ckpt_path):
+        print("best_model.ckpt not found, skipping W&B artifact upload")
+        return
+
+    artifact = wandb.Artifact(
+        name=f"{wandb.run.name}-best-model",
+        type="model",
+        metadata={"best_loss": best_loss},
+    )
+    artifact.add_file(best_ckpt_path)
+    wandb.log_artifact(artifact, aliases=["best", "latest"])
+    print(f"uploaded best model artifact from {best_ckpt_path}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -268,4 +278,6 @@ if __name__ == '__main__':
             
         save_ckpt(network, optimizer, scheduler, epoch_i, best_loss, conf, save_best=save_best,)
 
-    wandb.finish()
+    if args.log:
+        upload_best_ckpt_artifact(conf, best_loss)
+        wandb.finish()

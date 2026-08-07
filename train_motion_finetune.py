@@ -12,7 +12,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from datasets import SeqeuncesDataset, collate_fcs
 from model import net_dict
-from train import train, test, evaluate, save_ckpt, write_wandb
+from train import train, test, evaluate, save_ckpt, write_wandb, upload_best_ckpt_artifact
 
 
 def torch_load(path, device):
@@ -272,4 +272,5 @@ if __name__ == "__main__":
         )
 
     if args.log:
+        upload_best_ckpt_artifact(conf, best_loss)
         wandb.finish()
