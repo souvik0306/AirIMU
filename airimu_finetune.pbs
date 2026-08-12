@@ -25,7 +25,7 @@ nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
 echo "Starting AirIMU finetuning"
 
 apptainer exec --nv -e $image \
-python3 train_motion_finetune.py \
+python3 -u train_motion_finetune.py \
 --config configs/exp/TLab/finetune_motion_body.conf \
 --device cuda:0
 
