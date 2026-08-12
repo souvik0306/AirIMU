@@ -1,4 +1,6 @@
 #!/bin/bash
+set -e
+
 #PBS -q auto_free
 #PBS -j oe
 #PBS -N airimu_finetune
