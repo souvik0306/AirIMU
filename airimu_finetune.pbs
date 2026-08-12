@@ -1,0 +1,30 @@
+#!/bin/bash
+#PBS -q auto_free
+#PBS -j oe
+#PBS -N airimu_finetune
+#PBS -l walltime=24:00:00
+#PBS -l select=1:ncpus=36:mem=250gb:ngpus=1
+
+cd $PBS_O_WORKDIR
+
+module load apptainer/1.4.1
+
+image=/app1/common/singularity-img/vanda/pytorch_2.5_cuda_12.4_unsloth.sif
+
+echo "Working directory:"
+pwd
+
+echo "Compute node:"
+hostname
+
+echo "GPU:"
+nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
+
+echo "Starting AirIMU finetuning"
+
+apptainer exec --nv -e $image \
+python3 train_motion_finetune.py \
+--config configs/exp/TLab/finetune_motion_body.conf \
+--device cuda:0
+
+echo "AirIMU finetuning finished"
