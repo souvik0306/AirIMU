@@ -22,11 +22,18 @@ hostname
 echo "GPU:"
 nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
 
-echo "Starting AirIMU finetuning"
+echo "Starting AirIMU Stage 1 (covaug=False)"
 
 apptainer exec --nv -e $image \
 python3 -u train_motion_finetune.py \
 --config configs/exp/TLab/finetune_motion_body.conf \
+--device cuda:0
+
+echo "Stage 1 finished. Starting Stage 2 (covaug=True)"
+
+apptainer exec --nv -e $image \
+python3 -u train_motion_finetune.py \
+--config configs/exp/TLab/finetune_motion_body_stage2.conf \
 --device cuda:0
 
 echo "AirIMU finetuning finished"

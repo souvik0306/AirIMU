@@ -43,15 +43,19 @@ def get_loss(inte_state, data, confs):
         cov_losses['pred_cov_pos'] = cov_diag[...,-3:].mean()
 
         if "covaug" in confs and confs["covaug"] is True:
-            rot_loss += confs.cov_weight * diag_ln_cov_loss(rot_dist, cov_diag[...,:3])
-            vel_loss += confs.cov_weight * diag_ln_cov_loss(vel_dist, cov_diag[...,3:6])
-            pos_loss += confs.cov_weight * diag_ln_cov_loss(pos_dist, cov_diag[...,-3:])
+            cov_rot_loss = diag_ln_cov_loss(rot_dist, cov_diag[...,:3])
+            cov_vel_loss = diag_ln_cov_loss(vel_dist, cov_diag[...,3:6])
+            cov_pos_loss = diag_ln_cov_loss(pos_dist, cov_diag[...,-3:])
         else:
-            rot_loss += confs.cov_weight * diag_ln_cov_loss(rot_dist.detach(), cov_diag[...,:3])
-            vel_loss += confs.cov_weight * diag_ln_cov_loss(vel_dist.detach(), cov_diag[...,3:6])
-            pos_loss += confs.cov_weight * diag_ln_cov_loss(pos_dist.detach(), cov_diag[...,-3:])
+            cov_rot_loss = diag_ln_cov_loss(rot_dist.detach(), cov_diag[...,:3])
+            cov_vel_loss = diag_ln_cov_loss(vel_dist.detach(), cov_diag[...,3:6])
+            cov_pos_loss = diag_ln_cov_loss(pos_dist.detach(), cov_diag[...,-3:])
+        # cov losses added directly so they are scaled only by cov_weight, not by state weights
+        cov_losses['vel_nll'] = cov_vel_loss.detach()
 
     loss += (confs.pos_weight * pos_loss + confs.rot_weight * rot_loss + confs.vel_weight * vel_loss)
+    if confs.propcov:
+        loss += confs.cov_weight * (cov_rot_loss + cov_vel_loss + cov_pos_loss)
     # report_hasNan(loss)
 
     return {'loss':loss, **state_losses, **cov_losses}
