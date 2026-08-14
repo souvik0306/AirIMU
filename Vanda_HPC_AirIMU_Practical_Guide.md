@@ -130,8 +130,7 @@ cd ~/AirIMU
 use this PBS file:
 
 ```bash
-#!/bin/bash
-
+#PBS -S /bin/bash
 #PBS -q auto_free
 #PBS -j oe
 #PBS -N airimu_finetune

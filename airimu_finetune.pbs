@@ -1,11 +1,11 @@
-#!/bin/bash
-set -e
-
+#PBS -S /bin/bash
 #PBS -q auto_free
 #PBS -j oe
 #PBS -N airimu_finetune
 #PBS -l walltime=24:00:00
 #PBS -l select=1:ncpus=36:mem=250gb:ngpus=1
+
+set -e
 
 cd $PBS_O_WORKDIR
 
