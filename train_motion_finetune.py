@@ -12,6 +12,8 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from datasets import SeqeuncesDataset, collate_fcs
 from model import net_dict
+from model.losses import get_loss
+from utils import move_to
 from train import train, test, evaluate, save_ckpt, write_wandb, upload_best_ckpt_artifact
 
 
@@ -50,6 +52,24 @@ def load_resume_state(network, optimizer, scheduler, ckpt_path, device):
     best_loss = checkpoint["best_loss"]
     print(f"resumed {ckpt_path} with best_loss {best_loss:f}")
     return epoch, best_loss
+
+
+def test_nll(network, loader, confs):
+    """Accumulates NLL metrics from get_loss; independent of train.py."""
+    network.eval()
+    rot_nlls, vel_nlls, pos_nlls, cov_nlls = 0.0, 0.0, 0.0, 0.0
+    with torch.no_grad():
+        for i, (data, init_state, label) in enumerate(loader):
+            data, init_state, label = move_to([data, init_state, label], confs.device)
+            inte_state = network(data, init_state)
+            loss_state = get_loss(inte_state, label, confs)
+            rot_nlls += loss_state["rot_nll"].item()
+            vel_nlls += loss_state["vel_nll"].item()
+            pos_nlls += loss_state["pos_nll"].item()
+            cov_nlls += loss_state["cov_nll"].item()
+    n = i + 1
+    return {"rot_nll": rot_nlls / n, "vel_nll": vel_nlls / n,
+            "pos_nll": pos_nlls / n, "cov_nll": cov_nlls / n}
 
 
 def build_loader(dataset, batch_size, shuffle, collate_fn, drop_last=False):
@@ -198,13 +218,22 @@ if __name__ == "__main__":
     )
     best_loss = np.inf
     epoch = 0
+    is_stage2 = "stage" in conf.train and conf.train.stage == 2
+    if is_stage2:
+        best_cov_nll = float("inf")
+        vel_limit = conf.train.stage1_vel_ref * (1.0 + conf.train.vel_degradation_limit)
 
     resume_path = os.path.join(conf.general.exp_dir, "ckpt/newest.ckpt")
     if args.load_ckpt:
         if os.path.isfile(resume_path):
-            epoch, best_loss = load_resume_state(
+            loaded_epoch, loaded_best = load_resume_state(
                 network, optimizer, scheduler, resume_path, args.device
             )
+            epoch = loaded_epoch + 1
+            if is_stage2:
+                best_cov_nll = loaded_best
+            else:
+                best_loss = loaded_best
         else:
             print("Can't find the finetuning checkpoint; loading pretrained weights.")
             pretrained_ckpt = args.pretrained_ckpt
@@ -228,7 +257,7 @@ if __name__ == "__main__":
         )
 
     initial_step = epoch
-    log_validation_metrics(
+    initial_test_loss, _ = log_validation_metrics(
         network,
         test_loader,
         eval_loader,
@@ -236,6 +265,22 @@ if __name__ == "__main__":
         args.log,
         initial_step,
     )
+
+    if is_stage2:
+        initial_nll = test_nll(network, test_loader, conf.train)
+        initial_vel = initial_test_loss["vel_loss"]
+        initial_cov_nll = initial_nll["cov_nll"]
+        if isinstance(initial_vel, torch.Tensor): initial_vel = initial_vel.item()
+        if isinstance(initial_cov_nll, torch.Tensor): initial_cov_nll = initial_cov_nll.item()
+        if initial_vel <= vel_limit:
+            best_cov_nll = min(best_cov_nll, initial_cov_nll)
+        print(
+            "Stage 2 baseline: vel = %.6f, cov_nll = %.6f"
+            % (initial_vel, initial_cov_nll)
+        )
+        if args.log:
+            write_wandb("monitor/vel", initial_vel, initial_step)
+            write_wandb("nll", initial_nll, initial_step)
 
     for epoch_i in range(epoch, conf.train.max_epoches):
         train_loss = train(network, train_loader, conf.train, epoch_i, optimizer)
@@ -254,23 +299,41 @@ if __name__ == "__main__":
             write_wandb("train", train_loss, log_step)
             write_wandb("lr", scheduler.optimizer.param_groups[0]["lr"], log_step)
 
-        scheduler.step(test_loss["loss"])
-        if test_loss["loss"] < best_loss:
-            best_loss = test_loss["loss"]
-            save_best = True
+        if is_stage2:
+            nll_metrics = test_nll(network, test_loader, conf.train)
+            vel = test_loss["vel_loss"]
+            vel_nll = nll_metrics["vel_nll"]
+            cov_nll = nll_metrics["cov_nll"]
+            if isinstance(vel, torch.Tensor): vel = vel.item()
+            if isinstance(vel_nll, torch.Tensor): vel_nll = vel_nll.item()
+            if isinstance(cov_nll, torch.Tensor): cov_nll = cov_nll.item()
+            if args.log:
+                write_wandb("monitor/vel", vel, log_step)
+                write_wandb("nll", nll_metrics, log_step)
+            scheduler.step(cov_nll)
+            if vel <= vel_limit and cov_nll < best_cov_nll:
+                best_cov_nll = cov_nll
+                save_best = True
+                print(
+                    "Saving best Stage 2 model: "
+                    "vel = %.6f, vel_nll = %.6f, cov_nll = %.6f"
+                    % (vel, vel_nll, cov_nll)
+                )
+            else:
+                save_best = False
+            save_ckpt(network, optimizer, scheduler, epoch_i, best_cov_nll, conf, save_best=save_best)
         else:
-            save_best = False
-
-        save_ckpt(
-            network,
-            optimizer,
-            scheduler,
-            epoch_i,
-            best_loss,
-            conf,
-            save_best=save_best,
-        )
+            scheduler.step(test_loss["loss"])
+            if test_loss["loss"] < best_loss:
+                best_loss = test_loss["loss"]
+                save_best = True
+            else:
+                save_best = False
+            save_ckpt(network, optimizer, scheduler, epoch_i, best_loss, conf, save_best=save_best)
 
     if args.log:
-        upload_best_ckpt_artifact(conf, best_loss)
+        if is_stage2:
+            upload_best_ckpt_artifact(conf, best_cov_nll)
+        else:
+            upload_best_ckpt_artifact(conf, best_loss)
         wandb.finish()

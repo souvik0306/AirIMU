@@ -51,7 +51,10 @@ def get_loss(inte_state, data, confs):
             cov_vel_loss = diag_ln_cov_loss(vel_dist.detach(), cov_diag[...,3:6])
             cov_pos_loss = diag_ln_cov_loss(pos_dist.detach(), cov_diag[...,-3:])
         # cov losses added directly so they are scaled only by cov_weight, not by state weights
+        cov_losses['rot_nll'] = cov_rot_loss.detach()
         cov_losses['vel_nll'] = cov_vel_loss.detach()
+        cov_losses['pos_nll'] = cov_pos_loss.detach()
+        cov_losses['cov_nll'] = (cov_rot_loss + cov_vel_loss + cov_pos_loss).detach()
 
     loss += (confs.pos_weight * pos_loss + confs.rot_weight * rot_loss + confs.vel_weight * vel_loss)
     if confs.propcov:
