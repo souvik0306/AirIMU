@@ -15,7 +15,13 @@ from pyhocon import ConfigFactory
 from datasets import SeqInfDataset, SeqDataset, imu_seq_collate
 
 from utils import CPU_Unpickler, integrate
-from utils.visualize_state import visualize_rotations,visualize_state_error, visualize_trajectory
+from utils.visualize_state import (
+    visualize_rotations,
+    visualize_state_error,
+    visualize_trajectory,
+    visualize_velocity_with_uncertainty,
+    visualize_ave_barplot,
+)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -170,9 +176,29 @@ if __name__ == '__main__':
                 
                 visualize_state_error(data_name,outstate,infstate,save_folder=folder,mask=mask,file_name="inte_error_compare.png")
                 visualize_state_error(data_name,relative_outstate,relative_infstate,mask=select_mask,save_folder=folder)
-            visualize_rotations(data_name,outstate['orientations_gt'][0],outstate['orientations'][0],infstate['orientations'][0],save_folder=folder)
-            visualize_trajectory(data_name, folder, outstate, infstate)
+                visualize_velocity_with_uncertainty(
+                    save_prefix=data_name,
+                    gt_vel=infstate['vel_gt'][0, 1:, :],
+                    air_vel=infstate['vel'][0, 1:, :],
+                    covs=infstate['covs'],
+                    dt=dataset.data['dt'][:dataset.seqlen],
+                    save_folder=folder,
+                    mask=mask,
+                    index_id=index_id,
+                )
+            visualize_rotations(
+                data_name,
+                outstate['orientations_gt'][0],
+                outstate['orientations'][0],
+                infstate['orientations'][0] if args.exp is not None else None,
+                save_folder=folder,
+            )
+            if args.exp is not None:
+                visualize_trajectory(data_name, folder, outstate, infstate)
             
         file_path = os.path.join(folder, "loss_result.json")
         with open(file_path, 'w') as f: 
             json.dump(AllResults, f, indent=4)
+
+    if len(AllResults) > 0:
+        visualize_ave_barplot(AllResults, folder)
