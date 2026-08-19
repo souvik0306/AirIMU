@@ -163,8 +163,34 @@ class CodeNet(ModelBase):
 
         out_state = self.integrate(init_state = init_state, data = data, cov_state = inference_state['cov_state'])
 
-        return {**out_state, 'correction_acc': inference_state['correction_acc'], 'correction_gyro': inference_state['correction_gyro'], 
-                                'corrected_acc': data['corrected_acc'], 'corrected_gyro': data['corrected_gyro']}
+        result = {
+            'pos': corrected_state['pos'],
+            'vel': corrected_state['vel'],
+            'rot': corrected_state['rot'],
+            'correction_acc': inference_state['correction_acc'],
+            'correction_gyro': inference_state['correction_gyro'],
+            'corrected_acc': corrected_data['corrected_acc'],
+            'corrected_gyro': corrected_data['corrected_gyro'],
+        }
+
+        if self.conf.propcov:
+            raw_data = dict(data)
+            raw_data['corrected_acc'] = data['acc'][:, self.interval:, :]
+            raw_data['corrected_gyro'] = data['gyro'][:, self.interval:, :]
+            raw_state = self.integrate(
+                init_state=init_state,
+                data=raw_data,
+                cov_state=inference_state['cov_state'],
+            )
+
+            result['raw_pos'] = raw_state['pos']
+            result['raw_vel'] = raw_state['vel']
+            result['raw_rot'] = raw_state['rot']
+            result['cov'] = raw_state['cov']
+            result['acc_cov'] = inference_state['cov_state']['acc_cov']
+            result['gyro_cov'] = inference_state['cov_state']['gyro_cov']
+
+        return result
 
 
 class CodePoseNet(CodeNet):

@@ -26,6 +26,7 @@ def train(network, loader, confs, epoch, optimizer):
     network.train()
     losses, pos_losses, rot_losses, vel_losses = 0, 0, 0, 0
     pred_cov_rot, pred_cov_vel, pred_cov_pos = 0, 0, 0
+    uncertainty = {k: 0 for k in ('raw_vel_rmse', 'vel_nees', 'vel_1sigma', 'vel_2sigma', 'vel_nll')}
     acc_covs, gyro_covs = 0, 0
     
     t_range = tqdm.tqdm(loader)
@@ -46,6 +47,8 @@ def train(network, loader, confs, epoch, optimizer):
             pred_cov_pos += loss_state['pred_cov_pos'].mean().item()
             pred_cov_rot += loss_state['pred_cov_rot'].mean().item()
             pred_cov_vel += loss_state['pred_cov_vel'].mean().item()
+            for key in uncertainty:
+                uncertainty[key] += loss_state[key].item()
             t_range.set_description(f'training epoch: %03d, losses: %.06f, position, %.06f rotation %.06f, pred_rot %.06f, pred_cov%.06f'%(epoch, \
                                     loss_state['loss'], (pos_losses/(i+1)), (rot_losses/(i+1)), \
                                     loss_state['pred_cov_rot'], loss_state['pred_cov_pos']))
@@ -59,8 +62,11 @@ def train(network, loader, confs, epoch, optimizer):
         loss_state['loss'].backward()
         optimizer.step()
 
-    return {"loss": (losses/(i+1)), "pos_loss": (pos_losses/(i+1)), "rot_loss": (rot_losses/(i+1)), "vel_loss":((vel_losses)/(i+1)),
-            "pred_cov_rot": (pred_cov_rot/(i+1)), "pred_cov_vel": (pred_cov_vel/(i+1)), "pred_cov_pos": (pred_cov_pos/(i+1))}
+    result = {"loss": (losses/(i+1)), "pos_loss": (pos_losses/(i+1)), "rot_loss": (rot_losses/(i+1)), "vel_loss":((vel_losses)/(i+1)),
+              "pred_cov_rot": (pred_cov_rot/(i+1)), "pred_cov_vel": (pred_cov_vel/(i+1)), "pred_cov_pos": (pred_cov_pos/(i+1))}
+    if confs.propcov:
+        result.update({key: value / (i + 1) for key, value in uncertainty.items()})
+    return result
 
 
 def test(network, loader, confs):
@@ -68,6 +74,7 @@ def test(network, loader, confs):
     with torch.no_grad():
         losses, pos_losses, rot_losses, vel_losses = 0, 0, 0, 0
         pred_cov_rot, pred_cov_vel, pred_cov_pos = 0, 0, 0
+        uncertainty = {k: 0 for k in ('raw_vel_rmse', 'vel_nees', 'vel_1sigma', 'vel_2sigma', 'vel_nll')}
         acc_covs, gyro_covs = [], []
 
         t_range = tqdm.tqdm(loader)
@@ -89,6 +96,8 @@ def test(network, loader, confs):
                 pred_cov_pos += loss_state['pred_cov_pos'].mean().item()
                 pred_cov_rot += loss_state['pred_cov_rot'].mean().item()
                 pred_cov_vel += loss_state['pred_cov_vel'].mean().item()
+                for key in uncertainty:
+                    uncertainty[key] += loss_state[key].item()
 
             t_range.set_description(f'testing losses: %.06f, position, %.06f rotation %.06f, vel %.06f'%(losses/(i+1), \
                 pos_losses/(i+1), rot_losses/(i+1), vel_losses/(i+1)))
@@ -99,8 +108,11 @@ def test(network, loader, confs):
         if gyro_covs:
             gyro_covs = torch.cat(gyro_covs)
 
-    return {"loss": (losses/(i+1)), "pos_loss":(pos_losses/(i+1)), "rot_loss":(rot_losses/(i+1)), "vel_loss":(vel_losses/(i+1)),
-            "pred_cov_rot": (pred_cov_rot/(i+1)), "pred_cov_vel": (pred_cov_vel/(i+1)), "pred_cov_pos": (pred_cov_pos/(i+1)), "acc_covs": acc_covs, "gyro_covs": gyro_covs}
+    result = {"loss": (losses/(i+1)), "pos_loss":(pos_losses/(i+1)), "rot_loss":(rot_losses/(i+1)), "vel_loss":(vel_losses/(i+1)),
+              "pred_cov_rot": (pred_cov_rot/(i+1)), "pred_cov_vel": (pred_cov_vel/(i+1)), "pred_cov_pos": (pred_cov_pos/(i+1)), "acc_covs": acc_covs, "gyro_covs": gyro_covs}
+    if confs.propcov:
+        result.update({key: value / (i + 1) for key, value in uncertainty.items()})
+    return result
 
 
 def write_wandb(header, objs, epoch_i):
@@ -261,9 +273,9 @@ if __name__ == '__main__':
         if epoch_i%conf.train.eval_freq == conf.train.eval_freq-1:
             eval_state = evaluate(network=network, loader = eval_loader, confs=conf.train)
             if args.log:
-                write_wandb('eval/pos_loss', eval_state['loss']['pos'].mean(), epoch_i)
-                write_wandb('eval/rot_loss', eval_state['loss']['rot'].mean(), epoch_i)
-                write_wandb('eval/vel_loss', eval_state['loss']['vel'].mean(), epoch_i)
+                write_wandb('eval/pos_rmse', eval_state['loss']['pos'].mean(), epoch_i)
+                write_wandb('eval/rot_rmse', eval_state['loss']['rot'].mean(), epoch_i)
+                write_wandb('eval/vel_rmse', eval_state['loss']['vel'].mean(), epoch_i)
                 write_wandb('eval/rot_dist', eval_state['loss']['rot_dist'].mean(), epoch_i)
                 write_wandb('eval/vel_dist', eval_state['loss']['vel_dist'].mean(), epoch_i)
                 write_wandb('eval/pos_dist', eval_state['loss']['pos_dist'].mean(), epoch_i)

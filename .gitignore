@@ -5,3 +5,8 @@ junk/*
 review_files/*
 *.csv
 *.DS_Store
+*.png
+*.pyc
+*.ckpt
+wandb/*
+.vscode/*

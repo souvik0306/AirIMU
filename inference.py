@@ -59,8 +59,8 @@ if __name__ == '__main__':
     parser.add_argument('--load', type=str, default=None, help='path for model check point')
     parser.add_argument("--device", type=str, default="cuda:0", help="cuda or cpu")
     parser.add_argument('--batch_size', type=int, default=1, help='batch size.')
-    parser.add_argument('--window_size', type=int, default=1000, help='window size for sliding window')
-    parser.add_argument('--step_size', type=int, default=1000, help='step size for sliding window')
+    parser.add_argument('--window_size', type=int, default=200, help='window size for sliding window')
+    parser.add_argument('--step_size', type=int, default=200, help='step size for sliding window')
     parser.add_argument('--train', default=False, action="store_true", help='if True, We will evaluate the training set (may be removed in the future).')
     parser.add_argument('--gtinit', default=True, action="store_false", help='if set False, we will use the integrated pose as the intial pose for the next integral')
     parser.add_argument('--whole', default=False, action="store_true", help='(may be removed in the future).')
@@ -163,13 +163,13 @@ if __name__ == '__main__':
             print(f"\n9. APPLYING CORRECTIONS:")
             print(f"   - Original IMU acc shape: {eval_dataset.acc[0].shape}")
             print(f"   - Correction acc shape: {inference_state['correction_acc'].squeeze(0).shape}")
-            print(f"   - Expected: Both should match to add corrections")
+            print(f"   - Expected: Both should match to add predicted corrections")
             if eval_dataset.acc[0].shape[0] != inference_state['correction_acc'].squeeze(0).shape[0]:
                 print(f"   ⚠️  WARNING: Shape mismatch detected!")
                 print(f"   - This happens with overlapping windows (step_size < window_size)")
                 print(f"   - You need to implement stitching/averaging of overlapping outputs")
             else:
-                print(f"   ✓ Shapes match - can directly add corrections")
+                print(f"   ✓ Shapes match - can directly add predicted corrections")
             
             print(f"\n10. FOR REAL-TIME INFERENCE (without GT):")
             print(f"   You need to provide for EACH window:")
