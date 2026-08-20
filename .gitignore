@@ -10,3 +10,4 @@ review_files/*
 *.ckpt
 wandb/*
 .vscode/*
+*.zip

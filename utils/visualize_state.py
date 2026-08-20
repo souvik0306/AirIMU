@@ -166,99 +166,79 @@ def visualize_trajectory(save_prefix, save_folder, outstate, infstate):
     plt.close()
 
 
-def visualize_velocity_with_uncertainty(
+def visualize_velocity_with_model_uncertainty(
     save_prefix,
     gt_vel,
     air_vel,
-    covs,
+    acc_cov,
+    gyro_cov,
     dt,
     save_folder,
     mask=None,
-    index_id=None,
 ):
     gt_vel = gt_vel.detach().cpu().numpy() if torch.is_tensor(gt_vel) else np.asarray(gt_vel)
     air_vel = air_vel.detach().cpu().numpy() if torch.is_tensor(air_vel) else np.asarray(air_vel)
+    acc_cov = acc_cov.detach().cpu().numpy() if torch.is_tensor(acc_cov) else np.asarray(acc_cov)
+    gyro_cov = gyro_cov.detach().cpu().numpy() if torch.is_tensor(gyro_cov) else np.asarray(gyro_cov)
     dt = dt.detach().cpu().numpy() if torch.is_tensor(dt) else np.asarray(dt)
 
     if gt_vel.ndim != 2 or air_vel.ndim != 2 or gt_vel.shape[1] != 3 or air_vel.shape[1] != 3:
         raise ValueError("Expected gt_vel and air_vel to have shape [N, 3].")
+    if acc_cov.ndim == 3:
+        acc_cov = acc_cov[0]
+    if gyro_cov.ndim == 3:
+        gyro_cov = gyro_cov[0]
+    if acc_cov.ndim != 2 or gyro_cov.ndim != 2 or acc_cov.shape[1] != 3 or gyro_cov.shape[1] != 3:
+        raise ValueError("Expected acc_cov and gyro_cov to have shape [N, 3] or [1, N, 3].")
 
-    seq_len = min(gt_vel.shape[0], air_vel.shape[0])
+    seq_len = min(gt_vel.shape[0], air_vel.shape[0], acc_cov.shape[0], gyro_cov.shape[0])
     gt_vel = gt_vel[:seq_len]
     air_vel = air_vel[:seq_len]
+    acc_cov = acc_cov[:seq_len]
+    gyro_cov = gyro_cov[:seq_len]
+
+    if dt.ndim > 1:
+        dt = dt.reshape(-1)
+    if dt.size >= seq_len:
+        t = np.concatenate(([0.0], np.cumsum(dt[: seq_len - 1])))
+    else:
+        t = np.arange(seq_len, dtype=np.float64)
 
     if mask is not None:
         mask = mask.detach().cpu().numpy() if torch.is_tensor(mask) else np.asarray(mask)
         mask = mask.astype(bool)[:seq_len]
+        t = t[mask]
         gt_vel = gt_vel[mask]
         air_vel = air_vel[mask]
-
-    if dt.ndim > 1:
-        dt = dt.reshape(-1)
-
-    if dt.size >= (gt_vel.shape[0] - 1):
-        t = np.concatenate(([0.0], np.cumsum(dt[: gt_vel.shape[0] - 1])))
-    else:
-        t = np.arange(gt_vel.shape[0], dtype=np.float64)
-
-    covs_np = covs.detach().cpu().numpy() if torch.is_tensor(covs) else np.asarray(covs)
-    if covs_np.ndim == 4:
-        covs_np = covs_np[0]
-    if covs_np.ndim != 3 or covs_np.shape[-2:] != (9, 9):
-        raise ValueError("Expected covs to have shape [K, 9, 9] or [1, K, 9, 9].")
-
-    vel_var = np.clip(np.diagonal(covs_np, axis1=-2, axis2=-1)[:, 3:6], a_min=0.0, a_max=None)
-    vel_sigma = np.sqrt(vel_var)
-
-    if index_id is not None and dt.size > 0:
-        idx = index_id.detach().cpu().numpy() if torch.is_tensor(index_id) else np.asarray(index_id)
-        idx = idx.astype(np.int64)
-        idx = np.concatenate(([0], idx))
-        dt_cum = np.concatenate(([0.0], np.cumsum(dt)))
-        idx = np.clip(idx, 0, dt_cum.shape[0] - 1)
-        t_sigma = dt_cum[idx]
-        if t_sigma.shape[0] != vel_sigma.shape[0]:
-            t_sigma = np.linspace(0.0, t[-1] if t.size > 0 else 0.0, vel_sigma.shape[0])
-    else:
-        t_sigma = np.linspace(0.0, t[-1] if t.size > 0 else 0.0, vel_sigma.shape[0])
+        acc_cov = acc_cov[mask]
+        gyro_cov = gyro_cov[mask]
 
     axis_labels = ["x", "y", "z"]
-    category_path = _category_dir(save_folder, save_prefix, "velocity")
+    category_path = _category_dir(save_folder, save_prefix, "uncertainty")
 
-    for axis in range(3):
-        fig, (ax_vel, ax_unc) = plt.subplots(
-            2,
-            1,
-            sharex=True,
-            figsize=(10, 6),
-            dpi=600,
-            gridspec_kw={"height_ratios": [2.0, 1.0]},
-        )
+    for axis, axis_label in enumerate(axis_labels):
+        fig, axs = plt.subplots(3, 1, sharex=True, figsize=(12, 9), dpi=600)
 
-        vel_gt_line = ax_vel.plot(t, gt_vel[:, axis], color="mediumseagreen", linewidth=1.0, label="GT velocity")[0]
-        vel_air_line = ax_vel.plot(t, air_vel[:, axis], color="red", linewidth=1.0, label="AirIMU velocity")[0]
-        sigma_line = ax_unc.plot(
-            t_sigma,
-            vel_sigma[:, axis],
-            color="royalblue",
-            linestyle="--",
-            linewidth=1.0,
-            label="AirIMU velocity uncertainty (1-sigma)",
-        )[0]
+        axs[0].plot(t, gt_vel[:, axis], color="mediumseagreen", linewidth=0.9, label=f"GT vel_{axis_label}")
+        axs[0].plot(t, air_vel[:, axis], color="red", linewidth=0.9, label=f"AirIMU vel_{axis_label}")
+        axs[1].plot(t, acc_cov[:, axis], color="tab:orange", linewidth=0.9, label=f"acc_cov_{axis_label}")
+        axs[2].plot(t, gyro_cov[:, axis], color="tab:purple", linewidth=0.9, label=f"gyro_cov_{axis_label}")
 
-        ax_vel.set_title(f"Velocity ({axis_labels[axis]}) vs Relative Time")
-        ax_vel.set_ylabel("Velocity (m/s)")
-        ax_unc.set_xlabel("Relative time t (s)")
-        ax_unc.set_ylabel("Uncertainty (m/s)")
-        ax_vel.grid(True)
-        ax_unc.grid(True)
+        axs[0].set_title(f"Velocity and Model Uncertainty Outputs ({axis_label} axis)")
+        axs[0].set_ylabel("velocity (m/s)")
+        axs[1].set_ylabel("acc_cov output")
+        axs[2].set_ylabel("gyro_cov output")
+        axs[2].set_xlabel("Relative time t (s)")
 
-        ax_vel.legend([vel_gt_line, vel_air_line], [vel_gt_line.get_label(), vel_air_line.get_label()], loc="best")
-        ax_unc.legend([sigma_line], [sigma_line.get_label()], loc="best")
+        for ax in axs:
+            ax.grid(True)
+            ax.legend(loc="best")
 
-        full_path = os.path.join(category_path, f"velocity_{axis_labels[axis]}_with_uncertainty.png")
         plt.tight_layout()
-        plt.savefig(full_path, dpi=600)
+        plt.savefig(
+            os.path.join(category_path, f"velocity_{axis_label}_with_uncertainty_outputs.png"),
+            dpi=600,
+        )
         plt.close(fig)
 
 
@@ -332,4 +312,3 @@ def visualize_ave_barplot(all_results, save_folder, file_name="ave_raw_vs_airimu
     plt.tight_layout()
     plt.savefig(os.path.join(summary_dir, file_name), dpi=600)
     plt.close(fig)
-

@@ -2,7 +2,6 @@
 import os, sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir)))
 
-import os
 import json
 import argparse
 import numpy as np
@@ -19,7 +18,7 @@ from utils.visualize_state import (
     visualize_rotations,
     visualize_state_error,
     visualize_trajectory,
-    visualize_velocity_with_uncertainty,
+    visualize_velocity_with_model_uncertainty,
     visualize_ave_barplot,
 )
 
@@ -176,15 +175,15 @@ if __name__ == '__main__':
                 
                 visualize_state_error(data_name,outstate,infstate,save_folder=folder,mask=mask,file_name="inte_error_compare.png")
                 visualize_state_error(data_name,relative_outstate,relative_infstate,mask=select_mask,save_folder=folder)
-                visualize_velocity_with_uncertainty(
+                visualize_velocity_with_model_uncertainty(
                     save_prefix=data_name,
                     gt_vel=infstate['vel_gt'][0, 1:, :],
                     air_vel=infstate['vel'][0, 1:, :],
-                    covs=infstate['covs'],
-                    dt=dataset.data['dt'][:dataset.seqlen],
+                    acc_cov=inference_state['acc_cov'],
+                    gyro_cov=inference_state['gyro_cov'],
+                    dt=inference_state['dt'],
                     save_folder=folder,
                     mask=mask,
-                    index_id=index_id,
                 )
             visualize_rotations(
                 data_name,
