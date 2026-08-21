@@ -22,6 +22,28 @@ from utils.visualize_state import (
     visualize_ave_barplot,
 )
 
+
+def sequence_key(data_root, data_name):
+    dataset_name = os.path.basename(os.path.normpath(str(data_root)))
+    return f"{dataset_name}/{data_name}"
+
+
+def plot_prefix(data_root, data_name):
+    dataset_name = os.path.basename(os.path.normpath(str(data_root)))
+    if dataset_name.endswith("_dataset"):
+        dataset_name = dataset_name[:-len("_dataset")]
+    if dataset_name.startswith("T-Lab_"):
+        dataset_name = "Tlab_" + dataset_name[len("T-Lab_"):]
+    else:
+        dataset_name = dataset_name.replace("T-Lab", "Tlab")
+    for month in [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ]:
+        dataset_name = dataset_name.replace(f"_{month}", f" {month.lower()}")
+    return f"{dataset_name}/{data_name}"
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=str, default="cpu", help="cuda or cpu, Default is cuda:0")
@@ -53,9 +75,13 @@ if __name__ == '__main__':
     for data_conf in dataset_conf.data_list:
         print(data_conf)
         for data_name in data_conf.data_drive:
+            source_key = sequence_key(data_conf.data_root, data_name)
+            save_prefix = plot_prefix(data_conf.data_root, data_name)
             print(data_conf.data_root, data_name)
             print("data_conf.dataroot", data_conf.data_root)
             print("data_name", data_name)
+            print("source_key", source_key)
+            print("save_prefix", save_prefix)
             print("data_conf.name", data_conf.name)
 
             dataset = SeqDataset(data_conf.data_root, data_name, args.device, name = data_conf.name, duration=args.seqlen, step_size=args.seqlen, drop_last=False, conf = dataset_conf)
@@ -85,7 +111,15 @@ if __name__ == '__main__':
             )
 
             if args.exp is not None:
-                inference_state = inference_state_load[data_name] 
+                print("Loading inference key:", source_key)
+
+                if source_key not in inference_state_load:
+                    available_keys = ", ".join(list(inference_state_load.keys())[:10])
+                    raise KeyError(
+                        f"Could not find inference result for {source_key}. "
+                        f"First available keys: {available_keys}"
+                    )
+                inference_state = inference_state_load[source_key]
                 dataset_inf = SeqInfDataset(data_conf.data_root, data_name, inference_state, device = args.device, name = data_conf.name,duration=args.seqlen, step_size=args.seqlen, drop_last=False, conf = dataset_conf)
                 infloader = Data.DataLoader(dataset=dataset_inf, batch_size=1, 
                                             collate_fn=imu_seq_collate, 
@@ -119,7 +153,10 @@ if __name__ == '__main__':
                     
                 #save loss result
                 result_dic = {
-                    'name': data_name,
+                    'name': save_prefix,
+                    'source_key': source_key,
+                    'data_root': data_conf.data_root,
+                    'data_drive': data_name,
                     'use_gt_rot': args.usegtrot,
                     'AOE(raw)':180./np.pi * outstate['rot_dist'][0, mask].mean().numpy(),
                     'ATE(raw)':outstate['pos_dist'][0, mask].mean().item(),
@@ -173,10 +210,10 @@ if __name__ == '__main__':
                 print("rot_err: ", relative_infstate['rot_dist'].mean())
                 print("vel_err: ", relative_infstate['vel_dist'].mean())
                 
-                visualize_state_error(data_name,outstate,infstate,save_folder=folder,mask=mask,file_name="inte_error_compare.png")
-                visualize_state_error(data_name,relative_outstate,relative_infstate,mask=select_mask,save_folder=folder)
+                visualize_state_error(save_prefix,outstate,infstate,save_folder=folder,mask=mask,file_name="inte_error_compare.png")
+                visualize_state_error(save_prefix,relative_outstate,relative_infstate,mask=select_mask,save_folder=folder)
                 visualize_velocity_with_model_uncertainty(
-                    save_prefix=data_name,
+                    save_prefix=save_prefix,
                     gt_vel=infstate['vel_gt'][0, 1:, :],
                     air_vel=infstate['vel'][0, 1:, :],
                     acc_cov=inference_state['acc_cov'],
@@ -186,14 +223,14 @@ if __name__ == '__main__':
                     mask=mask,
                 )
             visualize_rotations(
-                data_name,
+                save_prefix,
                 outstate['orientations_gt'][0],
                 outstate['orientations'][0],
                 infstate['orientations'][0] if args.exp is not None else None,
                 save_folder=folder,
             )
             if args.exp is not None:
-                visualize_trajectory(data_name, folder, outstate, infstate)
+                visualize_trajectory(save_prefix, folder, outstate, infstate)
             
         file_path = os.path.join(folder, "loss_result.json")
         with open(file_path, 'w') as f: 

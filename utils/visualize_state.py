@@ -6,13 +6,17 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
 
-def _safe_drive_name(save_prefix):
-    return str(save_prefix).replace(os.sep, "_").replace(" ", "_")
+def _safe_drive_parts(save_prefix):
+    parts = []
+    for part in str(save_prefix).replace("\\", "/").split("/"):
+        if part in ("", "."):
+            continue
+        parts.append(part.replace("..", "__"))
+    return parts if parts else ["sequence"]
 
 
 def _category_dir(save_folder, save_prefix, category):
-    drive_name = _safe_drive_name(save_prefix)
-    category_path = os.path.join(save_folder, drive_name, category)
+    category_path = os.path.join(save_folder, *_safe_drive_parts(save_prefix), category)
     os.makedirs(category_path, exist_ok=True)
     return category_path
 

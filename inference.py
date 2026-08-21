@@ -14,6 +14,11 @@ from model import net_dict
 from utils import *
 
 
+def sequence_key(data_root, data_name):
+    dataset_name = os.path.basename(os.path.normpath(str(data_root)))
+    return f"{dataset_name}/{data_name}"
+
+
 
 def inference(network, loader, confs):
     '''
@@ -108,33 +113,70 @@ if __name__ == '__main__':
     cov_result, rmse = [], []
     net_out_result = {}
     evals = {}
-    dataset_conf.data_list[0]["window_size"] = args.window_size
-    dataset_conf.data_list[0]["step_size"] = args.step_size
     for data_conf in dataset_conf.data_list:
+
+        # Apply inference window and step size to EVERY dataset entry
+        data_conf["window_size"] = args.window_size
+        data_conf["step_size"] = args.step_size
+
+        print(
+            f"\nINFERENCE CONFIG:"
+            f"\n  Dataset: {data_conf['data_root']}"
+            f"\n  Window size: {data_conf['window_size']}"
+            f"\n  Step size: {data_conf['step_size']}"
+        )
+
         for path in data_conf.data_drive:
+            source_key = sequence_key(data_conf["data_root"], path)
+
             if args.whole:
                 dataset_conf["mode"] = "inference"
             else:
                 dataset_conf["mode"] = "infevaluate"
+
             dataset_conf["exp_dir"] = conf.general.exp_dir
-            print("\n"*3 + str(dataset_conf))
-            eval_dataset = SeqeuncesDataset(data_set_config=dataset_conf, data_path=path, data_root=data_conf["data_root"])
-            eval_loader = Data.DataLoader(dataset=eval_dataset, batch_size=args.batch_size, 
-                                            shuffle=False, collate_fn=collate_fn, drop_last = False)
+
+            print("\n" * 3 + str(dataset_conf))
+
+            eval_dataset = SeqeuncesDataset(
+                data_set_config=dataset_conf,
+                data_path=path,
+                data_root=data_conf["data_root"]
+            )
+
+            eval_loader = Data.DataLoader(
+                dataset=eval_dataset,
+                batch_size=args.batch_size,
+                shuffle=False,
+                collate_fn=collate_fn,
+                drop_last=False
+            )
 
             # Print input info
-            print(f"\n--- Sequence: {path} ---")
+            print(f"\n--- Sequence: {source_key} ---")
+
             total_samples = eval_dataset.acc[0].shape[0]
-            window_size = dataset_conf.data_list[0]['window_size']
-            step_size = dataset_conf.data_list[0]['step_size']
+
+            # IMPORTANT: use the CURRENT dataset entry
+            window_size = data_conf["window_size"]
+            step_size = data_conf["step_size"]
+
             overlap = window_size - step_size
+
+            print(f"Dataset root: {data_conf['data_root']}")
             print(f"Total IMU samples: {total_samples}")
-            print(f"Window size: {window_size}, Step size: {step_size}, Overlap: {overlap}")
+            print(
+                f"Window size: {window_size}, "
+                f"Step size: {step_size}, "
+                f"Overlap: {overlap}"
+            )
             print(f"Sliding windows generated (len(dataset)): {len(eval_dataset)}")
+
             print("Sample input shapes:")
             sample = eval_dataset[0]
+
             for k, v in sample.items():
-                if hasattr(v, 'shape'):
+                if hasattr(v, "shape"):
                     print(f"  {k}: {v.shape}, dtype={v.dtype}")
                 else:
                     print(f"  {k}: type={type(v)}")
@@ -215,7 +257,15 @@ if __name__ == '__main__':
             print_arr("GT orientation", inference_state['rot'])
             print_arr("dt", inference_state['dt'])
             print(f"--- End Pickle Output ---\n")
-            net_out_result[path] = inference_state
+
+            if source_key in net_out_result:
+                raise ValueError(f"Duplicate inference key would overwrite results: {source_key}")
+            inference_state["data_root"] = data_conf["data_root"]
+            inference_state["data_name"] = path
+            inference_state["source_key"] = source_key
+            net_out_result[source_key] = inference_state
+
+            print("Saving inference key:", source_key)
 
             #### RPE and Cov analysis
             rpe_pos, rpe_rot, mse_pos = [], [], []
