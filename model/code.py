@@ -164,13 +164,13 @@ class CodeNet(ModelBase):
         out_state = self.integrate(init_state = init_state, data = data, cov_state = inference_state['cov_state'])
 
         result = {
-            'pos': corrected_state['pos'],
-            'vel': corrected_state['vel'],
-            'rot': corrected_state['rot'],
+            'pos': out_state['pos'],
+            'vel': out_state['vel'],
+            'rot': out_state['rot'],
             'correction_acc': inference_state['correction_acc'],
             'correction_gyro': inference_state['correction_gyro'],
-            'corrected_acc': corrected_data['corrected_acc'],
-            'corrected_gyro': corrected_data['corrected_gyro'],
+            'corrected_acc': data['corrected_acc'],
+            'corrected_gyro': data['corrected_gyro'],
         }
 
         if self.conf.propcov:
