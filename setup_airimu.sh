@@ -21,7 +21,14 @@ if [ ! -d "T-Lab_31st_July_dataset" ]; then
     wget https://github.com/souvik0306/AirIMU/releases/download/31st_July_fast_agile/T-Lab_31st_July_dataset.zip
     unzip T-Lab_31st_July_dataset.zip
 else
-    echo "TLab dataset already exists"
+    echo "TLab 31 July dataset already exists"
+fi
+
+if [ ! -d "T-Lab_28th_July_dataset" ]; then
+    wget https://github.com/souvik0306/AirIMU/releases/download/28th_july_hover/T-Lab_28th_July_dataset.zip
+    unzip T-Lab_28th_July_dataset.zip
+else
+    echo "TLab 28 July dataset already exists"
 fi
 
 echo
@@ -51,9 +58,16 @@ else
 fi
 
 if [ -d "./T-Lab_31st_July_dataset" ]; then
-    echo "TLab dataset found"
+    echo "TLab 31 July dataset found"
 else
-    echo "ERROR: TLab dataset not found"
+    echo "ERROR: TLab 31 July dataset not found"
+    exit 1
+fi
+
+if [ -d "./T-Lab_28th_July_dataset" ]; then
+    echo "TLab 28 July dataset found"
+else
+    echo "ERROR: TLab 28 July dataset not found"
     exit 1
 fi
 

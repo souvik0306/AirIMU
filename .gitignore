@@ -11,3 +11,6 @@ review_files/*
 wandb/*
 .vscode/*
 *.zip
+experiments/*
+airimu_finetune.*
+AirIMU_EuRoC/*
