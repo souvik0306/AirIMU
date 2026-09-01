@@ -25,6 +25,11 @@ from datasets import collate_fcs, SeqeuncesDataset
 from model import net_dict
 
 
+def sequence_key(data_root, data_name):
+    dataset_name = os.path.basename(os.path.normpath(str(data_root)))
+    return f"{dataset_name}/{data_name}"
+
+
 def inference(onnx_session, loader, confs, interval=9, torch_net=None, verbose=False):
     """
     ONNX-based correction inference.
@@ -280,6 +285,8 @@ if __name__ == '__main__':
     
     for data_conf in dataset_conf.data_list:
         for path in data_conf.data_drive:
+            source_key = sequence_key(data_conf["data_root"], path)
+
             if args.whole:
                 dataset_conf["mode"] = "inference"
             else:
@@ -287,7 +294,7 @@ if __name__ == '__main__':
             dataset_conf["exp_dir"] = conf.general.exp_dir
             
             print("\n" + "="*80)
-            print(f"Processing sequence: {path}")
+            print(f"Processing sequence: {source_key}")
             print("="*80)
             print(str(dataset_conf))
             
@@ -306,7 +313,7 @@ if __name__ == '__main__':
             )
 
             # Print dataset info
-            print(f"\n--- Sequence: {path} ---")
+            print(f"\n--- Sequence: {source_key} ---")
             total_samples = eval_dataset.acc[0].shape[0]
             window_size = dataset_conf.data_list[0]['window_size']
             step_size = dataset_conf.data_list[0]['step_size']
@@ -338,8 +345,14 @@ if __name__ == '__main__':
             inference_state['corrected_gyro'] = eval_dataset.gyro[0] + inference_state['correction_gyro'].squeeze(0).cpu()
             inference_state['rot'] = eval_dataset.gt_ori[0]
             inference_state['dt'] = eval_dataset.dt[0]
+            inference_state['data_root'] = data_conf["data_root"]
+            inference_state['data_name'] = path
+            inference_state['source_key'] = source_key
             
-            net_out_result[path] = inference_state
+            if source_key in net_out_result:
+                raise ValueError(f"Duplicate inference key would overwrite results: {source_key}")
+            net_out_result[source_key] = inference_state
+            print("Saving inference key:", source_key)
             print(f"✓ Completed: {inference_state['corrected_acc'].shape[0]} corrected samples")
 
     # Save results in pickle format (same as inference.py)
@@ -356,4 +369,4 @@ if __name__ == '__main__':
     print(f"\nCompare with PyTorch inference:")
     print(f"  python inference.py --config {args.config}")
     print(f"\nEvaluate results:")
-    print(f"  python evaluation/evaluate_state.py --pytorch {conf.general.exp_dir}/net_output.pickle --onnx {net_result_path}")
+    print(f"  python evaluation/evaluate_state.py --dataconf <dataset.conf> --exp {conf.general.exp_dir}")
