@@ -313,6 +313,10 @@ if __name__ == "__main__":
                 args.device,
                 strict=not args.non_strict_pretrained,
             )
+            if is_stage2:
+                # The pretrained cov heads are dead weight from a propcov=False
+                # stage; re-seed them at the target instead of keeping those stale values.
+                network.reset_cov_heads()
     else:
         pretrained_ckpt = args.pretrained_ckpt
         if pretrained_ckpt is None and "pretrained_ckpt" in conf.train:
@@ -323,6 +327,8 @@ if __name__ == "__main__":
             args.device,
             strict=not args.non_strict_pretrained,
         )
+        if is_stage2:
+            network.reset_cov_heads()
 
     initial_step = epoch
     initial_test_loss, initial_eval_state = log_validation_metrics(

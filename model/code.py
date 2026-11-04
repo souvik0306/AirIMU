@@ -32,16 +32,19 @@ class CodeNet(ModelBase):
         # datasheet std) used only to seed initialization and as a soft
         # regularization anchor in losses.py — the model can still use the
         # full range up to cov_max when the data genuinely demands it.
+        # Non-persistent: these are config-derived constants, not learned
+        # state, so they must never appear in / be restored from a checkpoint
+        # (older checkpoints predate these keys and would fail a strict load).
         acc_cov_min = conf.get("acc_cov_min", 0.01 ** 2)
         acc_cov_max = conf.get("acc_cov_max", 0.35 ** 2)
-        acc_cov_target = conf.get("acc_cov_target", 0.07 ** 2)
+        self.acc_cov_target = conf.get("acc_cov_target", 0.07 ** 2)
         gyro_cov_min = conf.get("gyro_cov_min", 0.0001 ** 2)
         gyro_cov_max = conf.get("gyro_cov_max", 0.015 ** 2)
-        gyro_cov_target = conf.get("gyro_cov_target", 0.003 ** 2)
-        self.register_buffer('acc_cov_min', torch.tensor(acc_cov_min))
-        self.register_buffer('acc_cov_max', torch.tensor(acc_cov_max))
-        self.register_buffer('gyro_cov_min', torch.tensor(gyro_cov_min))
-        self.register_buffer('gyro_cov_max', torch.tensor(gyro_cov_max))
+        self.gyro_cov_target = conf.get("gyro_cov_target", 0.003 ** 2)
+        self.register_buffer('acc_cov_min', torch.tensor(acc_cov_min), persistent=False)
+        self.register_buffer('acc_cov_max', torch.tensor(acc_cov_max), persistent=False)
+        self.register_buffer('gyro_cov_min', torch.tensor(gyro_cov_min), persistent=False)
+        self.register_buffer('gyro_cov_max', torch.tensor(gyro_cov_max), persistent=False)
 
         ## the encoder have the same correction in one interval 
         self.interval = 9
@@ -59,11 +62,18 @@ class CodeNet(ModelBase):
         self.gyrodecoder = nn.Sequential(nn.Linear(256, 128), nn.GELU(), nn.Linear(128, 3))
         self.gyrocov_decoder = nn.Sequential(nn.Linear(256, 128), nn.GELU(), nn.Linear(128, 3))
 
-        # Start the covariance heads at the desired target (not the sigmoid
-        # midpoint), so training has to justify raising uncertainty above it.
-        # An explicit *_cov_init_fraction still overrides this if set.
-        acc_default_fraction = (acc_cov_target - acc_cov_min) / (acc_cov_max - acc_cov_min)
-        gyro_default_fraction = (gyro_cov_target - gyro_cov_min) / (gyro_cov_max - gyro_cov_min)
+        self.reset_cov_heads()
+
+    def reset_cov_heads(self):
+        """(Re-)seed the covariance heads at the desired target (not the
+        sigmoid midpoint), so training has to justify raising uncertainty
+        above it. Must be called again after loading a pretrained checkpoint:
+        those heads are dead weight carried over from a propcov=False stage
+        and would otherwise silently overwrite this initialization.
+        """
+        conf = self.conf
+        acc_default_fraction = (self.acc_cov_target - self.acc_cov_min) / (self.acc_cov_max - self.acc_cov_min)
+        gyro_default_fraction = (self.gyro_cov_target - self.gyro_cov_min) / (self.gyro_cov_max - self.gyro_cov_min)
         acc_init_fraction = conf.get("acc_cov_init_fraction", conf.get("cov_init_fraction", acc_default_fraction))
         gyro_init_fraction = conf.get("gyro_cov_init_fraction", conf.get("cov_init_fraction", gyro_default_fraction))
         for decoder, init_fraction in (
@@ -72,7 +82,7 @@ class CodeNet(ModelBase):
         ):
             last_linear = decoder[-1]
             nn.init.zeros_(last_linear.weight)
-            nn.init.constant_(last_linear.bias, math.log(init_fraction / (1 - init_fraction)))
+            nn.init.constant_(last_linear.bias, math.log(float(init_fraction) / (1 - float(init_fraction))))
 
     def encoder(self, x):
         x = self.cnn(x.transpose(-1,-2)).transpose(-1,-2)
