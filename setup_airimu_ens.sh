@@ -19,6 +19,11 @@ fail() {
 }
 
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || fail "$PYTHON_BIN was not found."
+check_python_version() {
+    "$1" -c 'import sys; sys.exit(0 if (3, 10) <= sys.version_info[:2] <= (3, 12) else 1)' || fail \
+        "Pinned dependencies require Python 3.10–3.12. Use Python 3.11 with PYTHON_BIN and a fresh VENV_DIR (for example, .venv311)."
+}
+check_python_version "$PYTHON_BIN"
 if [[ "$SKIP_DOWNLOADS" != "1" ]]; then
     command -v unzip >/dev/null 2>&1 || fail "unzip is required to extract the datasets."
     if command -v curl >/dev/null 2>&1; then
@@ -42,6 +47,12 @@ else
 fi
 
 VENV_PYTHON="$VENV_DIR/bin/python"
+check_python_version "$VENV_PYTHON"
+if ! "$VENV_PYTHON" -m pip --version >/dev/null 2>&1; then
+    echo "Bootstrapping pip in the virtual environment..."
+    "$VENV_PYTHON" -m ensurepip --upgrade || fail \
+        "Could not bootstrap pip. Install the venv package matching $PYTHON_BIN, then rerun this setup."
+fi
 "$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel
 "$VENV_PYTHON" -m pip install -r requirements.txt
 
