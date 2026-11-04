@@ -28,7 +28,7 @@ DEVICE=cuda:0
 # Add --log to disable Weights & Biases logging.
 # -----------------------------------------------------------------------------
 
-python3 -u train_motion_finetune.py --config configs/exp/TLab/finetune_motion_body.conf --device "$DEVICE"
+# python3 -u train_motion_finetune.py --config configs/exp/TLab/finetune_motion_body.conf --device "$DEVICE"
 
 
 # -----------------------------------------------------------------------------

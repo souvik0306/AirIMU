@@ -8,6 +8,32 @@ from model.net import ModelBase
 from model.cnn import CNNEncoder
 
 
+@torch.no_grad()
+def _print_output_summary(name, value, variance=False):
+    """Preview the first sequence and summarize all batch/time samples by axis."""
+    value = value.detach().cpu()
+    print(f"   - {name} shape: {value.shape}")
+    if value.numel() == 0:
+        print(f"   - {name}: no samples")
+        return
+
+    print(f"   - First {min(3, value.shape[1])} {name} values:")
+    for i in range(min(3, value.shape[1])):
+        print(f"     {name}[{i}] = {value[0, i, :].tolist()}")
+
+    samples = value.reshape(-1, value.shape[-1])
+    print(f"   - {name} statistics (all batch/time samples; axes x, y, z):")
+    for label, stat in (
+        ("mean", samples.mean(dim=0)),
+        ("std", samples.std(dim=0, unbiased=False)),
+        ("min", samples.amin(dim=0)),
+        ("max", samples.amax(dim=0)),
+    ):
+        print(f"     {label} = {stat.tolist()}")
+    if variance:
+        print(f"     mean predicted noise std (sqrt(variance)) = {samples.sqrt().mean(dim=0).tolist()}")
+
+
 class CodeNet(ModelBase):
     def __init__(self, conf):
         super().__init__(conf)
@@ -176,21 +202,6 @@ class CodeNet(ModelBase):
         correction_acc = self._update(zero_signal.clone(), correction[...,:3], frame_len)
         correction_gyro = self._update(zero_signal.clone(), correction[...,3:], frame_len)
         
-        # Print output info for first call
-        if not hasattr(self, '_output_printed'):
-            print(f"\n7. MODEL OUTPUT:")
-            print(f"   - correction_acc shape: {correction_acc.shape}")
-            print(f"   - correction_gyro shape: {correction_gyro.shape}")
-            print(f"   - Output length matches real data: {frame_len} frames")
-            print(f"   - First 3 correction_acc values:")
-            for i in range(min(3, correction_acc.shape[1])):
-                print(f"     correction_acc[{i}] = {correction_acc[0, i, :].detach().cpu().tolist()}")
-            print(f"   - First 3 correction_gyro values:")
-            for i in range(min(3, correction_gyro.shape[1])):
-                print(f"     correction_gyro[{i}] = {correction_gyro[0, i, :].detach().cpu().tolist()}")
-            print("="*80 + "\n")
-            self._output_printed = True
-
         # covariance propagation
         cov_state = {'acc_cov':None, 'gyro_cov': None,}
         if self.conf.propcov:
@@ -199,6 +210,22 @@ class CodeNet(ModelBase):
                                                 cov[...,:3], frame_len)
             cov_state['gyro_cov'] = self._update(torch.zeros_like(correction_gyro, device=correction_gyro.device),
                                                 cov[...,3:], frame_len)
+
+        # Print once, after covariance decoding so all outputs are available.
+        if not hasattr(self, '_output_printed'):
+            print(f"\n7. MODEL OUTPUT:")
+            print(f"   - Output length matches real data: {frame_len} frames")
+            print("   - Sample previews use batch item 0")
+            _print_output_summary('correction_acc', correction_acc)
+            _print_output_summary('correction_gyro', correction_gyro)
+            if self.conf.propcov:
+                print("   - Covariance outputs are diagonal variances (axes x, y, z)")
+                _print_output_summary('acc_cov', cov_state['acc_cov'], variance=True)
+                _print_output_summary('gyro_cov', cov_state['gyro_cov'], variance=True)
+            else:
+                print("   - acc_cov / gyro_cov: unavailable (propcov=False; covariance prediction disabled)")
+            print("="*80 + "\n")
+            self._output_printed = True
         
         return {"cov_state": cov_state, 'correction_acc': correction_acc, 'correction_gyro': correction_gyro}
 
@@ -208,7 +235,11 @@ class CodeNet(ModelBase):
         data['corrected_acc'] = data['acc'][:,self.interval:,:] + inference_state['correction_acc']
         data['corrected_gyro'] = data['gyro'][:,self.interval:,:] + inference_state['correction_gyro']
 
-        out_state = self.integrate(init_state = init_state, data = data, cov_state = inference_state['cov_state'])
+        # Only the raw integration below supplies covariance to the loss.
+        out_state = self.integrate(
+            init_state=init_state, data=data,
+            cov_state=inference_state['cov_state'], propagate_cov=False,
+        )
 
         result = {
             'pos': out_state['pos'],

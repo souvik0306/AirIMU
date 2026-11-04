@@ -127,7 +127,7 @@ def build_loader(
 
 
 def log_validation_metrics(network, test_loader, eval_loader, conf, log_enabled, step):
-    test_loss = test(network, test_loader, conf.train)
+    test_loss = test(network, test_loader, conf.train, epoch=step)
     print("test loss: %f" % (test_loss["loss"]))
     if log_enabled:
         write_wandb("test", test_loss, step)

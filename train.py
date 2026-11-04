@@ -8,6 +8,7 @@ import argparse
 
 import tqdm, wandb
 from utils import move_to
+from utils.output_metrics import OutputMetrics
 from model import net_dict
 from pyhocon import ConfigFactory
 from pyhocon import HOCONConverter as conf_convert
@@ -16,120 +17,131 @@ from datasets import SeqeuncesDataset, collate_fcs
 from model.losses import get_loss
 from eval import evaluate
 
-torch.autograd.set_detect_anomaly(True)
+
+class _LossMetrics:
+    """Keep detached loss totals on the device until a reporting interval."""
+
+    def __init__(self, propcov, uncertainty_keys=()):
+        self.sources = {
+            'loss': 'loss', 'pos_loss': 'pos', 'rot_loss': 'rot', 'vel_loss': 'vel',
+        }
+        if propcov:
+            self.sources.update({key: key for key in (
+                'pred_cov_rot', 'pred_cov_vel', 'pred_cov_pos', *uncertainty_keys,
+            )})
+        self.total = None
+        self.count = 0
+
+    def update(self, loss_state):
+        values = torch.stack([
+            loss_state[source].detach().reshape(()) for source in self.sources.values()
+        ]).double()
+        if self.total is None:
+            self.total = values
+        else:
+            self.total.add_(values)
+        self.count += 1
+
+    def averages(self):
+        values = (self.total / self.count).cpu().tolist()
+        result = dict(zip(self.sources, values))
+        for key in ('pred_cov_rot', 'pred_cov_vel', 'pred_cov_pos'):
+            result.setdefault(key, 0.0)
+        return result
+
 
 def train(network, loader, confs, epoch, optimizer):
-    """
-    Train network for one epoch using a specified data loader
-    Outputs all targets, predicts, predicted covariance params, and losses
-    """
+    """Train for one epoch, transferring scalar metrics only when reporting."""
     network.train()
-    losses, pos_losses, rot_losses, vel_losses = 0, 0, 0, 0
-    pred_cov_rot, pred_cov_vel, pred_cov_pos = 0, 0, 0
-    uncertainty = {k: 0 for k in ('raw_vel_rmse', 'vel_nees', 'vel_1sigma', 'vel_2sigma', 'vel_nll')}
-    acc_covs, gyro_covs = 0, 0
-    
+    metrics = _LossMetrics(confs.propcov, (
+        'raw_vel_rmse', 'vel_nees', 'vel_1sigma', 'vel_2sigma', 'vel_nll',
+    ))
+    output_metrics = OutputMetrics()
+    log_interval = max(1, int(confs.get('log_interval', 10)))
+
     t_range = tqdm.tqdm(loader)
-    for i, (data, init_state, label) in enumerate(t_range):
-        data, init_state, label = move_to(
-            [data, init_state, label], confs.device, non_blocking=True
-        )
-        inte_state = network(data, init_state)
-        loss_state = get_loss(inte_state, label, confs)
+    # Anomaly tracing is useful for debugging, but expensive on every step.
+    with torch.autograd.set_detect_anomaly(bool(confs.get('detect_anomaly', False))):
+        for i, (data, init_state, label) in enumerate(t_range):
+            data, init_state, label = move_to(
+                [data, init_state, label], confs.device, non_blocking=True
+            )
+            optimizer.zero_grad(set_to_none=True)
+            inte_state = network(data, init_state)
+            loss_state = get_loss(inte_state, label, confs)
+            output_metrics.update(inte_state)
+            metrics.update(loss_state)
+            loss_state['loss'].backward()
+            optimizer.step()
 
-        # statistics
-        losses += loss_state['loss'].item()
-        pos_losses += loss_state['pos'].item()
-        rot_losses += loss_state['rot'].item()
-        vel_losses += loss_state['vel'].item()
+            if (i + 1) % log_interval == 0 or i + 1 == len(loader):
+                current = metrics.averages()
+                description = (
+                    f"training epoch: {epoch:03d}, losses: {current['loss']:.6f}, "
+                    f"position {current['pos_loss']:.6f}, rotation {current['rot_loss']:.6f}, "
+                    f"velocity {current['vel_loss']:.6f}"
+                )
+                if confs.propcov:
+                    description += (
+                        f", pred_rot {current['pred_cov_rot']:.6f}, "
+                        f"pred_cov {current['pred_cov_pos']:.6f}"
+                    )
+                t_range.set_description(description, refresh=False)
 
-        if confs.propcov:
-            acc_covs += inte_state["acc_cov"].mean().item()
-            gyro_covs += inte_state["gyro_cov"].mean().item()
-            pred_cov_pos += loss_state['pred_cov_pos'].mean().item()
-            pred_cov_rot += loss_state['pred_cov_rot'].mean().item()
-            pred_cov_vel += loss_state['pred_cov_vel'].mean().item()
-            for key in uncertainty:
-                uncertainty[key] += loss_state[key].item()
-            t_range.set_description(f'training epoch: %03d, losses: %.06f, position, %.06f rotation %.06f, pred_rot %.06f, pred_cov%.06f'%(epoch, \
-                                    loss_state['loss'], (pos_losses/(i+1)), (rot_losses/(i+1)), \
-                                    loss_state['pred_cov_rot'], loss_state['pred_cov_pos']))
-        
-        else:
-            t_range.set_description(f'training epoch: %03d, losses: %.06f, position, %.06f rotation %.06f, velocity %.06f'%(epoch, \
-                                    loss_state['loss'], (pos_losses/(i+1)), (rot_losses/(i+1)), loss_state['vel']))
-
-        t_range.refresh()
-        optimizer.zero_grad()
-        loss_state['loss'].backward()
-        optimizer.step()
-
-    result = {"loss": (losses/(i+1)), "pos_loss": (pos_losses/(i+1)), "rot_loss": (rot_losses/(i+1)), "vel_loss":((vel_losses)/(i+1)),
-              "pred_cov_rot": (pred_cov_rot/(i+1)), "pred_cov_vel": (pred_cov_vel/(i+1)), "pred_cov_pos": (pred_cov_pos/(i+1))}
-    if confs.propcov:
-        result.update({key: value / (i + 1) for key, value in uncertainty.items()})
+    result = metrics.averages()
+    result.update(output_metrics.summarize('TRAIN', epoch=epoch + 1, propcov=confs.propcov))
     return result
 
 
-def test(network, loader, confs):
+def test(network, loader, confs, epoch=None):
     network.eval()
-    with torch.no_grad():
-        losses, pos_losses, rot_losses, vel_losses = 0, 0, 0, 0
-        pred_cov_rot, pred_cov_vel, pred_cov_pos = 0, 0, 0
-        uncertainty = {
-            k: 0
-            for k in (
-                'raw_vel_rmse', 'vel_nees', 'vel_1sigma', 'vel_2sigma',
-                'rot_nll', 'vel_nll', 'pos_nll', 'cov_nll',
-            )
-        }
-        acc_covs, gyro_covs = [], []
+    output_metrics = OutputMetrics()
+    metrics = _LossMetrics(confs.propcov, (
+        'raw_vel_rmse', 'vel_nees', 'vel_1sigma', 'vel_2sigma',
+        'rot_nll', 'vel_nll', 'pos_nll', 'cov_nll',
+    ))
+    log_interval = max(1, int(confs.get('log_interval', 10)))
+    acc_covs, gyro_covs = [], []
 
+    with torch.no_grad():
         t_range = tqdm.tqdm(loader)
         for i, (data, init_state, label) in enumerate(t_range):
-
             data, init_state, label = move_to(
                 [data, init_state, label], confs.device, non_blocking=True
             )
             inte_state = network(data, init_state)
-
             loss_state = get_loss(inte_state, label, confs)
-            # statistics
-            losses += loss_state['loss'].item()
-            pos_losses += loss_state["pos"].item()
-            rot_losses += loss_state["rot"].item()
-            vel_losses += loss_state['vel'].item()
+            output_metrics.update(inte_state)
+            metrics.update(loss_state)
 
             if confs.propcov:
-                acc_covs.append(inte_state["acc_cov"].reshape(-1))
-                gyro_covs.append(inte_state["gyro_cov"].reshape(-1))
-                pred_cov_pos += loss_state['pred_cov_pos'].mean().item()
-                pred_cov_rot += loss_state['pred_cov_rot'].mean().item()
-                pred_cov_vel += loss_state['pred_cov_vel'].mean().item()
-                for key in uncertainty:
-                    uncertainty[key] += loss_state[key].item()
+                acc_covs.append(inte_state['acc_cov'].reshape(-1))
+                gyro_covs.append(inte_state['gyro_cov'].reshape(-1))
 
-            t_range.set_description(f'testing losses: %.06f, position, %.06f rotation %.06f, vel %.06f'%(losses/(i+1), \
-                pos_losses/(i+1), rot_losses/(i+1), vel_losses/(i+1)))
-            t_range.refresh()
+            if (i + 1) % log_interval == 0 or i + 1 == len(loader):
+                current = metrics.averages()
+                t_range.set_description(
+                    f"testing losses: {current['loss']:.6f}, "
+                    f"position {current['pos_loss']:.6f}, rotation {current['rot_loss']:.6f}, "
+                    f"velocity {current['vel_loss']:.6f}", refresh=False,
+                )
 
         if acc_covs:
             acc_covs = torch.cat(acc_covs)
         if gyro_covs:
             gyro_covs = torch.cat(gyro_covs)
 
-    result = {"loss": (losses/(i+1)), "pos_loss":(pos_losses/(i+1)), "rot_loss":(rot_losses/(i+1)), "vel_loss":(vel_losses/(i+1)),
-              "pred_cov_rot": (pred_cov_rot/(i+1)), "pred_cov_vel": (pred_cov_vel/(i+1)), "pred_cov_pos": (pred_cov_pos/(i+1)), "acc_covs": acc_covs, "gyro_covs": gyro_covs}
-    if confs.propcov:
-        result.update({key: value / (i + 1) for key, value in uncertainty.items()})
+    result = metrics.averages()
+    result.update({'acc_covs': acc_covs, 'gyro_covs': gyro_covs})
+    result.update(output_metrics.summarize('VALIDATION', epoch=epoch, propcov=confs.propcov))
     return result
 
 
 def write_wandb(header, objs, epoch_i):
     if isinstance(objs, dict):
-        for k, v in objs.items():
-            if isinstance(v, float):
-                wandb.log({os.path.join(header, k): v}, epoch_i)
+        metrics = {os.path.join(header, k): v for k, v in objs.items() if isinstance(v, float)}
+        if metrics:
+            wandb.log(metrics, step=epoch_i)
     else:
         wandb.log({header: objs}, step = epoch_i)
 
@@ -271,7 +283,7 @@ if __name__ == '__main__':
 
     for epoch_i in range(epoch, conf.train.max_epoches):
         train_loss = train(network, train_loader, conf.train, epoch_i, optimizer)
-        test_loss = test(network, test_loader, conf.train)
+        test_loss = test(network, test_loader, conf.train, epoch=epoch_i + 1)
         print("train loss: %f test loss: %f"%(train_loss["loss"], test_loss["loss"]))
 
         # save the training meta information

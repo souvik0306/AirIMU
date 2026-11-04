@@ -12,5 +12,5 @@ wandb/*
 .vscode/*
 *.zip
 experiments/*
-.venv/
+.venv311/
 AirIMU_EuRoC/*
