@@ -22,26 +22,26 @@ hostname
 echo "GPU:"
 nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
 
-# echo "Starting AirIMU Stage 1 (covaug=False)"
+echo "Starting AirIMU Stage 1 (covaug=False)"
 
-# apptainer exec --nv -e $image \
-# python3 -u train_motion_finetune.py \
-# --config configs/exp/TLab/finetune_motion_body.conf \
-# --device cuda:0
+apptainer exec --nv -e $image \
+python3 -u train_motion_finetune.py \
+--config configs/exp/TLab/finetune_motion_body.conf \
+--device cuda:0
 
-# echo "Stage 1 finished. Starting Stage 2 (covaug=True)"
+echo "Stage 1 finished. Starting Stage 2 (covaug=True)"
 
-# apptainer exec --nv -e $image \
-# python3 -u train_motion_finetune.py \
-# --config configs/exp/TLab/finetune_motion_body_stage2.conf \
-# --device cuda:0
+apptainer exec --nv -e $image \
+python3 -u train_motion_finetune.py \
+--config configs/exp/TLab/finetune_motion_body_stage2.conf \
+--device cuda:0
 
 echo "Stage 2 finished. Running inference and evaluation"
 
 apptainer exec -e $image \
 python3 -u inference.py \
 --config configs/exp/TLab/finetune_motion_body_stage2.conf \
---device cpu
+--device cuda:0
 
 apptainer exec -e $image \
 python3 -u evaluation/evaluate_state.py \
@@ -53,9 +53,10 @@ echo "Inference and evaluation finished. Exporting the best model to ONNX"
 apptainer exec -e $image \
 python3 -u export_onnx_fp32.py \
 --config configs/exp/TLab/finetune_motion_body_stage2.conf \
---ckpt experiments/tlab_stage2_3rd_Nov/finetune_motion_body_stage2/ckpt/0029.ckpt \
---onnx experiments/tlab_stage2_3rd_Nov/finetune_motion_body_stage2/airimu_cpu_fp32_finetuned.onnx \
---torch experiments/tlab_stage2_3rd_Nov/finetune_motion_body_stage2/airimu_cpu_fp32.pt \
+--device cuda:0 \
+--ckpt experiments/tlab_stage2_4th_Nov/finetune_motion_body_stage2/ckpt/0029.ckpt \
+--onnx experiments/tlab_stage2_4th_Nov/finetune_motion_body_stage2/airimu_cpu_fp32_finetuned.onnx \
+--torch experiments/tlab_stage2_4th_Nov/finetune_motion_body_stage2/airimu_cpu_fp32.pt \
 --num-imu-frames 200
 
 echo "AirIMU finetuning and ONNX export finished"
