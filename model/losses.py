@@ -90,9 +90,37 @@ def get_loss(inte_state, data, confs):
         cov_losses['pos_nll'] = cov_pos_loss.detach()
         cov_losses['cov_nll'] = (cov_rot_loss + cov_vel_loss + cov_pos_loss).detach()
 
+        # Direct pressure on the raw per-step acc/gyro variance (what the EKF
+        # actually consumes), independent of the long-horizon integrated NLL,
+        # so the model can't settle for a merely "legitimate" but inflated
+        # covariance driven by multi-step raw drift rather than sensor noise.
+        # Normalized by the desired target (not the hard ceiling) and split
+        # per-sensor since drone performance is more gyro-sensitive.
+        cov_losses['acc_cov_mean'] = inte_state['acc_cov'].mean().detach()
+        cov_losses['gyro_cov_mean'] = inte_state['gyro_cov'].mean().detach()
+        acc_cov_reg_weight = confs.get('acc_cov_reg_weight', confs.get('cov_reg_weight', 0.0))
+        gyro_cov_reg_weight = confs.get('gyro_cov_reg_weight', confs.get('cov_reg_weight', 0.0))
+        if acc_cov_reg_weight > 0 or gyro_cov_reg_weight > 0:
+            acc_cov_target = confs.get('acc_cov_target', 0.07 ** 2)
+            gyro_cov_target = confs.get('gyro_cov_target', 0.003 ** 2)
+            acc_cov_reg_loss = (inte_state['acc_cov'] / acc_cov_target).mean()
+            gyro_cov_reg_loss = (inte_state['gyro_cov'] / gyro_cov_target).mean()
+            cov_losses['acc_cov_reg'] = acc_cov_reg_loss.detach()
+            cov_losses['gyro_cov_reg'] = gyro_cov_reg_loss.detach()
+
+        # Rotation NLL is driven almost entirely by gyro_cov, so it gets its
+        # own weight (falls back to cov_weight if not set separately).
+        rot_cov_weight = confs.get('rot_cov_weight', confs.cov_weight)
+        vel_cov_weight = confs.get('vel_cov_weight', confs.cov_weight)
+        pos_cov_weight = confs.get('pos_cov_weight', confs.cov_weight)
+
     loss += (confs.pos_weight * pos_loss + confs.rot_weight * rot_loss + confs.vel_weight * vel_loss)
     if confs.propcov:
-        loss += confs.cov_weight * (cov_rot_loss + cov_vel_loss + cov_pos_loss)
+        loss += rot_cov_weight * cov_rot_loss + vel_cov_weight * cov_vel_loss + pos_cov_weight * cov_pos_loss
+        if acc_cov_reg_weight > 0:
+            loss += acc_cov_reg_weight * acc_cov_reg_loss
+        if gyro_cov_reg_weight > 0:
+            loss += gyro_cov_reg_weight * gyro_cov_reg_loss
     # report_hasNan(loss)
 
     return {'loss':loss, **state_losses, **cov_losses}

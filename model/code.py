@@ -25,6 +25,24 @@ class CodeNet(ModelBase):
             acc_std = conf.acc_std
         self.register_buffer('acc_std', torch.tensor(acc_std))
 
+        # Hard ceiling on predicted variance so the covariance head cannot
+        # "cheat" the NLL loss by inflating uncertainty without limit.
+        # cov_max is the original datasheet noise density, squared (never to
+        # be exceeded); cov_target is the desired operating point (1/5 of the
+        # datasheet std) used only to seed initialization and as a soft
+        # regularization anchor in losses.py — the model can still use the
+        # full range up to cov_max when the data genuinely demands it.
+        acc_cov_min = conf.get("acc_cov_min", 0.01 ** 2)
+        acc_cov_max = conf.get("acc_cov_max", 0.35 ** 2)
+        acc_cov_target = conf.get("acc_cov_target", 0.07 ** 2)
+        gyro_cov_min = conf.get("gyro_cov_min", 0.0001 ** 2)
+        gyro_cov_max = conf.get("gyro_cov_max", 0.015 ** 2)
+        gyro_cov_target = conf.get("gyro_cov_target", 0.003 ** 2)
+        self.register_buffer('acc_cov_min', torch.tensor(acc_cov_min))
+        self.register_buffer('acc_cov_max', torch.tensor(acc_cov_max))
+        self.register_buffer('gyro_cov_min', torch.tensor(gyro_cov_min))
+        self.register_buffer('gyro_cov_max', torch.tensor(gyro_cov_max))
+
         ## the encoder have the same correction in one interval 
         self.interval = 9
         self.inter_head = np.floor(self.interval/2.).astype(int)
@@ -41,6 +59,21 @@ class CodeNet(ModelBase):
         self.gyrodecoder = nn.Sequential(nn.Linear(256, 128), nn.GELU(), nn.Linear(128, 3))
         self.gyrocov_decoder = nn.Sequential(nn.Linear(256, 128), nn.GELU(), nn.Linear(128, 3))
 
+        # Start the covariance heads at the desired target (not the sigmoid
+        # midpoint), so training has to justify raising uncertainty above it.
+        # An explicit *_cov_init_fraction still overrides this if set.
+        acc_default_fraction = (acc_cov_target - acc_cov_min) / (acc_cov_max - acc_cov_min)
+        gyro_default_fraction = (gyro_cov_target - gyro_cov_min) / (gyro_cov_max - gyro_cov_min)
+        acc_init_fraction = conf.get("acc_cov_init_fraction", conf.get("cov_init_fraction", acc_default_fraction))
+        gyro_init_fraction = conf.get("gyro_cov_init_fraction", conf.get("cov_init_fraction", gyro_default_fraction))
+        for decoder, init_fraction in (
+            (self.acccov_decoder, acc_init_fraction),
+            (self.gyrocov_decoder, gyro_init_fraction),
+        ):
+            last_linear = decoder[-1]
+            nn.init.zeros_(last_linear.weight)
+            nn.init.constant_(last_linear.bias, math.log(init_fraction / (1 - init_fraction)))
+
     def encoder(self, x):
         x = self.cnn(x.transpose(-1,-2)).transpose(-1,-2)
         x, _ = self.gru1(x)
@@ -49,8 +82,12 @@ class CodeNet(ModelBase):
         return x
 
     def cov_decoder(self, x):
-        acc = torch.exp(self.acccov_decoder(x) - 5.)
-        gyro = torch.exp(self.gyrocov_decoder(x) - 5.)
+        # Bounded sigmoid parameterization: variance is always within
+        # [cov_min, cov_max] regardless of the raw network output, so the
+        # model cannot drive uncertainty above the sensor's physical noise
+        # floor to minimize the NLL loss.
+        acc = self.acc_cov_min + (self.acc_cov_max - self.acc_cov_min) * torch.sigmoid(self.acccov_decoder(x))
+        gyro = self.gyro_cov_min + (self.gyro_cov_max - self.gyro_cov_min) * torch.sigmoid(self.gyrocov_decoder(x))
 
         return torch.cat([acc, gyro], dim = -1)
 
