@@ -1,5 +1,6 @@
 import os, warnings
 import torch
+import pypose as pp
 import io, pickle
 import numpy as np
 from pyproj import Proj, transform
@@ -33,22 +34,32 @@ def Gaussian_noise(num_nodes, sigma_x=0.05 ,sigma_y=0.05, sigma_z=0.05):
     std = torch.stack([torch.ones(num_nodes)*sigma_x, torch.ones(num_nodes)*sigma_y, torch.ones(num_nodes)*sigma_z], dim=-1)
     return torch.normal(mean = 0, std = std)
 
-def move_to(obj, device):
-    if torch.is_tensor(obj):return obj.to(device)
+def move_to(obj, device, non_blocking=False):
+    if torch.is_tensor(obj):
+        return obj.to(device, non_blocking=non_blocking)
     elif obj is None:
         return None
     elif isinstance(obj, dict):
         res = {}
         for k, v in obj.items():
-            res[k] = move_to(v, device)
+            res[k] = move_to(v, device, non_blocking=non_blocking)
+            # DataLoader multiprocessing may deserialize LieTensor quaternions
+            # as plain tensors. Restore their SO3 type after device transfer.
+            if (
+                k in {"rot", "gt_rot", "init_rot"}
+                and torch.is_tensor(res[k])
+                and res[k].shape[-1:] == (4,)
+                and not isinstance(res[k], pp.LieTensor)
+            ):
+                res[k] = pp.SO3(res[k])
         return res
     elif isinstance(obj, list):
         res = []
         for v in obj:
-            res.append(move_to(v, device))
+            res.append(move_to(v, device, non_blocking=non_blocking))
         return res
     elif isinstance(obj, np.ndarray):
-        return torch.tensor(obj).to(device)
+        return torch.tensor(obj).to(device, non_blocking=non_blocking)
     else:
         raise TypeError("Invalid type for move_to", type(obj))
 

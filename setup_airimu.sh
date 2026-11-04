@@ -31,6 +31,27 @@ else
     echo "TLab 28 July dataset already exists"
 fi
 
+if [ ! -d "T-Lab_10th_September_dataset" ]; then
+    wget https://github.com/souvik0306/AirIMU/releases/download/10th_Sept/T-Lab_10th_September_dataset.zip
+    unzip T-Lab_10th_September_dataset.zip
+else
+    echo "TLab 10 September dataset already exists"
+fi
+
+if [ ! -d "T-Lab_14th_October_dataset" ]; then
+    wget https://github.com/souvik0306/AirIMU/releases/download/15th_oct/T-Lab_14th_October_dataset.zip
+    unzip T-Lab_14th_October_dataset.zip
+else
+    echo "TLab 14 October dataset already exists"
+fi
+
+if [ ! -d "T-Lab_15th_October_dataset" ]; then
+    wget https://github.com/souvik0306/AirIMU/releases/download/15th_oct/T-Lab_15th_October_dataset.zip
+    unzip T-Lab_15th_October_dataset.zip
+else
+    echo "TLab 15 October dataset already exists"
+fi
+
 echo
 echo "3. Downloading pretrained AirIMU EuRoC weights"
 
@@ -68,6 +89,27 @@ if [ -d "./T-Lab_28th_July_dataset" ]; then
     echo "TLab 28 July dataset found"
 else
     echo "ERROR: TLab 28 July dataset not found"
+    exit 1
+fi
+
+if [ -d "./T-Lab_10th_September_dataset" ]; then
+    echo "TLab 10 September dataset found"
+else
+    echo "ERROR: TLab 10 September dataset not found"
+    exit 1
+fi
+
+if [ -d "./T-Lab_14th_October_dataset" ]; then
+    echo "TLab 14 October dataset found"
+else
+    echo "ERROR: TLab 14 October dataset not found"
+    exit 1
+fi
+
+if [ -d "./T-Lab_15th_October_dataset" ]; then
+    echo "TLab 15 October dataset found"
+else
+    echo "ERROR: TLab 15 October dataset not found"
     exit 1
 fi
 

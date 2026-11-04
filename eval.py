@@ -32,7 +32,9 @@ def evaluate(network, loader, confs, silent_tqdm=False):
     with torch.no_grad():
         inte_state = None
         for i, (data, init_state, label) in enumerate(tqdm.tqdm(loader, disable=silent_tqdm)):
-            data, init_state, label = move_to([data, init_state, label], confs.device)
+            data, init_state, label = move_to(
+                [data, init_state, label], confs.device, non_blocking=True
+            )
             # Use the gt init state while there is no integration.
             if inte_state is not None and confs.gtinit is False:
                 init_state ={

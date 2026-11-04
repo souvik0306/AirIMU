@@ -12,7 +12,6 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from datasets import SeqeuncesDataset, collate_fcs
 from model import net_dict
-from model.losses import get_loss
 from utils import move_to
 from train import train, test, evaluate, save_ckpt, write_wandb, upload_best_ckpt_artifact
 
@@ -43,6 +42,41 @@ def load_pretrained_model(network, ckpt_path, device, strict=True):
         print(f"unexpected keys: {load_result.unexpected_keys}")
 
 
+def resolve_stage1_vel_ref(conf, pretrained_override=None):
+    """Resolve Stage 2's velocity guard from Stage 1's best checkpoint."""
+    configured_ref = conf.train.get("stage1_vel_ref", "auto")
+    if str(configured_ref).strip().lower() != "auto":
+        stage1_vel_ref = float(configured_ref)
+        source = "train.stage1_vel_ref"
+    else:
+        ckpt_path = pretrained_override or conf.train.get("pretrained_ckpt")
+        if not ckpt_path:
+            raise ValueError(
+                "train.stage1_vel_ref is 'auto', but no Stage 1 pretrained_ckpt "
+                "was configured."
+            )
+        if not os.path.isfile(ckpt_path):
+            raise FileNotFoundError(
+                f"Cannot resolve Stage 1 velocity reference; checkpoint not found: {ckpt_path}"
+            )
+
+        checkpoint = torch_load(ckpt_path, "cpu")
+        if "best_loss" not in checkpoint:
+            raise KeyError(
+                f"Cannot resolve Stage 1 velocity reference; {ckpt_path} has no best_loss."
+            )
+        stage1_vel_ref = float(checkpoint["best_loss"])
+        source = f"{ckpt_path}:best_loss"
+
+    if not np.isfinite(stage1_vel_ref) or stage1_vel_ref < 0:
+        raise ValueError(
+            f"Stage 1 velocity reference must be finite and non-negative, got {stage1_vel_ref}."
+        )
+
+    print(f"Stage 1 velocity reference: {stage1_vel_ref:.12g} (from {source})")
+    return stage1_vel_ref
+
+
 def load_resume_state(network, optimizer, scheduler, ckpt_path, device):
     checkpoint = torch_load(ckpt_path, device)
     network.load_state_dict(checkpoint["model_state_dict"])
@@ -54,31 +88,41 @@ def load_resume_state(network, optimizer, scheduler, ckpt_path, device):
     return epoch, best_loss
 
 
-def test_nll(network, loader, confs):
-    """Accumulates NLL metrics from get_loss; independent of train.py."""
-    network.eval()
-    rot_nlls, vel_nlls, pos_nlls, cov_nlls = 0.0, 0.0, 0.0, 0.0
-    with torch.no_grad():
-        for i, (data, init_state, label) in enumerate(loader):
-            data, init_state, label = move_to([data, init_state, label], confs.device)
-            inte_state = network(data, init_state)
-            loss_state = get_loss(inte_state, label, confs)
-            rot_nlls += loss_state["rot_nll"].item()
-            vel_nlls += loss_state["vel_nll"].item()
-            pos_nlls += loss_state["pos_nll"].item()
-            cov_nlls += loss_state["cov_nll"].item()
-    n = i + 1
-    return {"rot_nll": rot_nlls / n, "vel_nll": vel_nlls / n,
-            "pos_nll": pos_nlls / n, "cov_nll": cov_nlls / n}
+NLL_KEYS = ("rot_nll", "vel_nll", "pos_nll", "cov_nll")
 
 
-def build_loader(dataset, batch_size, shuffle, collate_fn, drop_last=False):
+def extract_nll_metrics(test_loss):
+    """Reuse NLL metrics already accumulated by the normal test pass."""
+    return {key: test_loss[key] for key in NLL_KEYS}
+
+
+def build_loader(
+    dataset,
+    batch_size,
+    shuffle,
+    collate_fn,
+    drop_last=False,
+    num_workers=0,
+    pin_memory=False,
+    prefetch_factor=2,
+    persistent_workers=False,
+):
+    loader_kwargs = {
+        "dataset": dataset,
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "collate_fn": collate_fn,
+        "drop_last": drop_last,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "persistent_workers": persistent_workers and num_workers > 0,
+    }
+    # PyTorch only accepts prefetch_factor when multiprocessing is enabled.
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+
     return Data.DataLoader(
-        dataset=dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        collate_fn=collate_fn,
-        drop_last=drop_last,
+        **loader_kwargs,
     )
 
 
@@ -160,6 +204,13 @@ if __name__ == "__main__":
     conf = ConfigFactory.parse_file(args.config)
 
     conf.train.device = args.device
+    is_stage2 = "stage" in conf.train and conf.train.stage == 2
+    if is_stage2:
+        # Resolve before saving parameters or starting W&B so the exact value
+        # used by this run is captured in both places.
+        conf.train.stage1_vel_ref = resolve_stage1_vel_ref(
+            conf, pretrained_override=args.pretrained_ckpt
+        )
     exp_folder = os.path.split(conf.general.exp_dir)[-1]
     conf_name = os.path.split(args.config)[-1].split(".")[0]
     conf["general"]["exp_dir"] = os.path.join(conf.general.exp_dir, conf_name)
@@ -175,14 +226,30 @@ if __name__ == "__main__":
         collate_fn_train = collate_fcs['base']
         collate_fn_test = collate_fcs['base']
 
+    loader_options = {
+        "num_workers": int(conf.train.get("num_workers", 0)),
+        "pin_memory": bool(conf.train.get("pin_memory", False)),
+        "prefetch_factor": int(conf.train.get("prefetch_factor", 2)),
+        "persistent_workers": bool(conf.train.get("persistent_workers", False)),
+    }
+    print(
+        "DataLoader settings: workers={num_workers}, pin_memory={pin_memory}, "
+        "prefetch_factor={prefetch_factor}, persistent_workers={persistent_workers}".format(
+            **loader_options
+        )
+    )
+
     train_loader = build_loader(
-        train_dataset, conf.train.batch_size, True, collate_fn_train
+        train_dataset, conf.train.batch_size, True, collate_fn_train,
+        **loader_options,
     )
     test_loader = build_loader(
-        test_dataset, conf.train.batch_size, False, collate_fn_test
+        test_dataset, conf.train.batch_size, False, collate_fn_test,
+        **loader_options,
     )
     eval_loader = build_loader(
-        eval_dataset, conf.train.batch_size, False, collate_fn_test, drop_last=True
+        eval_dataset, conf.train.batch_size, False, collate_fn_test,
+        drop_last=True, **loader_options,
     )
 
     os.makedirs(os.path.join(conf.general.exp_dir, "ckpt"), exist_ok=True)
@@ -218,7 +285,6 @@ if __name__ == "__main__":
     )
     best_vel_rmse = float("inf")
     epoch = 0
-    is_stage2 = "stage" in conf.train and conf.train.stage == 2
     if is_stage2:
         best_vel_nll = float("inf")
         vel_limit = conf.train.stage1_vel_ref * (1.0 + conf.train.vel_degradation_limit)
@@ -269,7 +335,7 @@ if __name__ == "__main__":
     )
 
     if is_stage2:
-        initial_nll = test_nll(network, test_loader, conf.train)
+        initial_nll = extract_nll_metrics(initial_test_loss)
         initial_vel_rmse = initial_eval_state['loss']['vel'].mean().item()
         initial_vel_nll = initial_nll["vel_nll"]
         if isinstance(initial_vel_nll, torch.Tensor): initial_vel_nll = initial_vel_nll.item()
@@ -301,7 +367,7 @@ if __name__ == "__main__":
             write_wandb("lr", scheduler.optimizer.param_groups[0]["lr"], log_step)
 
         if is_stage2:
-            nll_metrics = test_nll(network, test_loader, conf.train)
+            nll_metrics = extract_nll_metrics(test_loss)
             val_vel_rmse = eval_state['loss']['vel'].mean().item()
             vel_nll = nll_metrics["vel_nll"]
             cov_nll = nll_metrics["cov_nll"]

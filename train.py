@@ -31,7 +31,9 @@ def train(network, loader, confs, epoch, optimizer):
     
     t_range = tqdm.tqdm(loader)
     for i, (data, init_state, label) in enumerate(t_range):
-        data, init_state, label = move_to([data, init_state, label], confs.device)
+        data, init_state, label = move_to(
+            [data, init_state, label], confs.device, non_blocking=True
+        )
         inte_state = network(data, init_state)
         loss_state = get_loss(inte_state, label, confs)
 
@@ -74,13 +76,21 @@ def test(network, loader, confs):
     with torch.no_grad():
         losses, pos_losses, rot_losses, vel_losses = 0, 0, 0, 0
         pred_cov_rot, pred_cov_vel, pred_cov_pos = 0, 0, 0
-        uncertainty = {k: 0 for k in ('raw_vel_rmse', 'vel_nees', 'vel_1sigma', 'vel_2sigma', 'vel_nll')}
+        uncertainty = {
+            k: 0
+            for k in (
+                'raw_vel_rmse', 'vel_nees', 'vel_1sigma', 'vel_2sigma',
+                'rot_nll', 'vel_nll', 'pos_nll', 'cov_nll',
+            )
+        }
         acc_covs, gyro_covs = [], []
 
         t_range = tqdm.tqdm(loader)
         for i, (data, init_state, label) in enumerate(t_range):
 
-            data, init_state, label = move_to([data, init_state, label], confs.device)
+            data, init_state, label = move_to(
+                [data, init_state, label], confs.device, non_blocking=True
+            )
             inte_state = network(data, init_state)
 
             loss_state = get_loss(inte_state, label, confs)

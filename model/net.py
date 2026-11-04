@@ -23,11 +23,14 @@ class ModelBase(nn.Module):
                 select[k] = data[k][:, start:end]
         return select
     
-    def integrate(self, init_state, data, cov_state):
+    def integrate(self, init_state, data, cov_state, use_gtrot=None):
         B, F = data["corrected_acc"].shape[:2]
         inte_pos, inte_vel, inte_rot, inte_cov = [], [], [], []
+        if use_gtrot is None:
+            use_gtrot = self.conf.gtrot
+
         gt_rot = None
-        if self.conf.gtrot:
+        if use_gtrot:
             gt_rot = data['rot']
         if "posonly" in self.conf.keys():
             data['corrected_gyro'] = data['gyro']
@@ -51,7 +54,7 @@ class ModelBase(nn.Module):
                         init_state["Rij"] = inte_state["Rij"]
                         init_state["cov"] = inte_state["cov"]
 
-                if self.conf.gtrot:
+                if use_gtrot:
                     gt_rot = selected_data['rot']
                 
                 ## starting point and ending point                

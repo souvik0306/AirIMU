@@ -181,6 +181,7 @@ class CodeNet(ModelBase):
                 init_state=init_state,
                 data=raw_data,
                 cov_state=inference_state['cov_state'],
+                use_gtrot=False,
             )
 
             result['raw_pos'] = raw_state['pos']
