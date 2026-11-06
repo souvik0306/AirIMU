@@ -171,6 +171,18 @@ def log_used_data_paths(conf):
     wandb.log({"data/used_paths": table})
 
 
+def save_best_ckpt(network, optimizer, scheduler, epoch_i, test_loss, conf):
+    print("saving the best model", test_loss)
+    best_ckpt_path = os.path.join(conf.general.exp_dir, "ckpt/best_model.ckpt")
+    torch.save({
+        'epoch': epoch_i,
+        'model_state_dict': network.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'best_loss': test_loss,
+    }, best_ckpt_path)
+
+
 def save_ckpt(network, optimizer, scheduler, epoch_i, test_loss, conf, save_best = False):
     if epoch_i%conf.train.save_freq==conf.train.save_freq-1:
         torch.save({
@@ -182,15 +194,9 @@ def save_ckpt(network, optimizer, scheduler, epoch_i, test_loss, conf, save_best
         }, os.path.join(conf.general.exp_dir, "ckpt/%04d.ckpt"%epoch_i))
 
     if save_best:
-        print("saving the best model", test_loss)
-        best_ckpt_path = os.path.join(conf.general.exp_dir, "ckpt/best_model.ckpt")
-        torch.save({
-        'epoch': epoch_i,
-        'model_state_dict': network.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
-        'best_loss': test_loss,
-        }, best_ckpt_path)
+        save_best_ckpt(
+            network, optimizer, scheduler, epoch_i, test_loss, conf
+        )
 
     torch.save({
         'epoch': epoch_i,

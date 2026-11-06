@@ -169,8 +169,8 @@ class TLab(Sequence):
 
     def align_all_to_euroc_frame(self):
         """Apply TLab-to-EuRoC frame alignment for IMU and GT state."""
-        self.align_imu_to_euroc_frame()
-        self.align_orientation_to_euroc_frame()
+        # self.align_imu_to_euroc_frame()
+        # self.align_orientation_to_euroc_frame()
         # self.align_position_to_euroc_frame() ## AirIMU requires GT position in TLab frame, so we don't align it to EuRoC frame.
         # self.align_velocity_to_euroc_frame() ## AirIMU requires GT velocity in TLab frame, so we don't align it to EuRoC frame.
 

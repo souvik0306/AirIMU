@@ -21,28 +21,51 @@ source "$VENV_DIR/bin/activate"
 DEVICE="${DEVICE:-cuda:0}"
 STAGE1_CONFIG=configs/exp/TLab/4th_Nov_Scratch.conf
 STAGE2_CONFIG=configs/exp/TLab/4th_Nov_Scratch_stage2.conf
-STAGE2_EXP=experiments/tlab_scratch_4th_Nov/4th_Nov_Scratch_stage2
+
+# A caller can explicitly provide RUN_ROOT. New runs get an SGT timestamp plus
+# the process ID, so even simultaneous launches are unique.
+if [[ -z "${RUN_ROOT:-}" ]]; then
+    RUN_ID="$(TZ=Asia/Singapore date +%Y%m%d_%H%M%S_SGT)_pid$$"
+    RUN_ROOT="experiments/$RUN_ID/scratch"
+fi
+STAGE1_EXP="$RUN_ROOT/stage1"
+STAGE2_EXP="$RUN_ROOT/stage2"
+
+echo "Run root: $RUN_ROOT"
 
 # -----------------------------------------------------------------------------
 # Stage 1: train IMU corrections from scratch
 # No --load_ckpt: always start from random initialization.
 # Add --log to either training command to disable Weights & Biases logging.
-# Outputs: experiments/tlab_scratch_4th_Nov/4th_Nov_Scratch/
+# Outputs: $RUN_ROOT/stage1/
 # -----------------------------------------------------------------------------
 
 python3 -u train_motion_finetune.py \
     --config "$STAGE1_CONFIG" \
+    --exp_dir "$STAGE1_EXP" \
     --pretrained_ckpt none \
     --device "$DEVICE"
 
+if [[ ! -f "$STAGE1_EXP/ckpt/best_model.ckpt" ]]; then
+    echo "ERROR: Stage 1 completed without best_model.ckpt" >&2
+    exit 3
+fi
+
 # -----------------------------------------------------------------------------
 # Stage 2: train uncertainty and covariance using the best scratch Stage 1 model
-# Outputs: experiments/tlab_scratch_4th_Nov/4th_Nov_Scratch_stage2/
+# Outputs: $RUN_ROOT/stage2/
 # -----------------------------------------------------------------------------
 
 python3 -u train_motion_finetune.py \
     --config "$STAGE2_CONFIG" \
+    --exp_dir "$STAGE2_EXP" \
+    --pretrained_ckpt "$STAGE1_EXP/ckpt/best_model.ckpt" \
     --device "$DEVICE"
+
+if [[ ! -f "$STAGE2_EXP/ckpt/best_model.ckpt" ]]; then
+    echo "ERROR: Stage 2 completed without an eligible best_model.ckpt" >&2
+    exit 4
+fi
 
 # -----------------------------------------------------------------------------
 # Run inference with the best Stage 2 checkpoint
@@ -50,6 +73,7 @@ python3 -u train_motion_finetune.py \
 
 python3 -u inference.py \
     --config "$STAGE2_CONFIG" \
+    --exp_dir "$STAGE2_EXP" \
     --device "$DEVICE"
 
 # -----------------------------------------------------------------------------

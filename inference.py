@@ -7,7 +7,7 @@ import pickle
 
 import tqdm
 from utils import move_to, save_state
-from pyhocon import ConfigFactory
+from pyhocon import ConfigFactory, ConfigTree
 
 from datasets import collate_fcs, SeqeuncesDataset
 from model import net_dict
@@ -62,6 +62,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/exp/EuRoC/codenet.conf', help='config file path')
     parser.add_argument('--load', type=str, default=None, help='path for model check point')
+    parser.add_argument(
+        '--exp_dir', type=str, default=None,
+        help='exact experiment directory containing ckpt/ and inference outputs',
+    )
     parser.add_argument("--device", type=str, default="cuda:0", help="cuda or cpu")
     parser.add_argument('--batch_size', type=int, default=1, help='batch size.')
     parser.add_argument('--window_size', type=int, default=200, help='window size for sliding window')
@@ -75,7 +79,18 @@ if __name__ == '__main__':
     conf = ConfigFactory.parse_file(args.config)
     conf.train.device = args.device
     conf_name = os.path.split(args.config)[-1].split(".")[0]
-    conf['general']['exp_dir'] = os.path.join(conf.general.exp_dir, conf_name)
+    if args.exp_dir is None:
+        if 'general' not in conf or 'exp_dir' not in conf.general:
+            parser.error(
+                "--exp_dir is required because this config does not contain "
+                "a run-specific general.exp_dir"
+            )
+        conf['general']['exp_dir'] = os.path.join(conf.general.exp_dir, conf_name)
+    else:
+        if 'general' not in conf:
+            conf['general'] = ConfigTree()
+        conf['general']['exp_dir'] = os.path.normpath(args.exp_dir)
+    print(f"Experiment directory: {conf.general.exp_dir}")
     conf.train['sampling'] = False
     conf["gtinit"] = args.gtinit
     conf['device'] = args.device

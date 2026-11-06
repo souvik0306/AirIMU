@@ -6,14 +6,22 @@ import numpy as np
 import torch
 import torch.utils.data as Data
 import wandb
-from pyhocon import ConfigFactory
+from pyhocon import ConfigFactory, ConfigTree
 from pyhocon import HOCONConverter as conf_convert
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from datasets import SeqeuncesDataset, collate_fcs
 from model import net_dict
 from utils import move_to
-from train import train, test, evaluate, save_ckpt, write_wandb, upload_best_ckpt_artifact
+from train import (
+    train,
+    test,
+    evaluate,
+    save_best_ckpt,
+    save_ckpt,
+    write_wandb,
+    upload_best_ckpt_artifact,
+)
 
 
 def torch_load(path, device):
@@ -181,6 +189,15 @@ if __name__ == "__main__":
         help="override train.pretrained_ckpt from the config",
     )
     parser.add_argument(
+        "--exp_dir",
+        type=str,
+        default=None,
+        help=(
+            "exact output directory for this training stage; when omitted, a "
+            "unique experiments/<SGT-time>_pid<PID>/<config-name> directory is used"
+        ),
+    )
+    parser.add_argument(
         "--load_ckpt",
         default=False,
         action="store_true",
@@ -211,9 +228,19 @@ if __name__ == "__main__":
         conf.train.stage1_vel_ref = resolve_stage1_vel_ref(
             conf, pretrained_override=args.pretrained_ckpt
         )
-    exp_folder = os.path.split(conf.general.exp_dir)[-1]
     conf_name = os.path.split(args.config)[-1].split(".")[0]
-    conf["general"]["exp_dir"] = os.path.join(conf.general.exp_dir, conf_name)
+    if "general" not in conf:
+        conf["general"] = ConfigTree()
+    if args.exp_dir is None:
+        sgt_tz = timezone(timedelta(hours=8))
+        run_id = datetime.now(sgt_tz).strftime("%Y%m%d_%H%M%S_SGT")
+        run_id = f"{run_id}_pid{os.getpid()}"
+        conf["general"]["exp_dir"] = os.path.join(
+            "experiments", run_id, conf_name
+        )
+    else:
+        conf["general"]["exp_dir"] = os.path.normpath(args.exp_dir)
+    print(f"Experiment directory: {conf.general.exp_dir}")
 
     train_dataset = SeqeuncesDataset(data_set_config=conf.dataset.train)
     test_dataset = SeqeuncesDataset(data_set_config=conf.dataset.test)
@@ -345,8 +372,21 @@ if __name__ == "__main__":
         initial_vel_rmse = initial_eval_state['loss']['vel'].mean().item()
         initial_vel_nll = initial_nll["vel_nll"]
         if isinstance(initial_vel_nll, torch.Tensor): initial_vel_nll = initial_vel_nll.item()
-        if initial_vel_rmse <= vel_limit:
-            best_vel_nll = min(best_vel_nll, initial_vel_nll)
+        if initial_vel_rmse <= vel_limit and initial_vel_nll < best_vel_nll:
+            best_vel_nll = initial_vel_nll
+            save_best_ckpt(
+                network,
+                optimizer,
+                scheduler,
+                epoch - 1,
+                best_vel_nll,
+                conf,
+            )
+            print(
+                "Saved eligible Stage 2 baseline as best model: "
+                "vel_rmse = %.6f, vel_nll = %.6f"
+                % (initial_vel_rmse, initial_vel_nll)
+            )
         print(
             "Stage 2 baseline: vel_rmse = %.6f, vel_nll = %.6f"
             % (initial_vel_rmse, initial_vel_nll)

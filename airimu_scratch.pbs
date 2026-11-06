@@ -1,0 +1,91 @@
+#PBS -S /bin/bash
+#PBS -q auto_free
+#PBS -j oe
+#PBS -N airimu_scratch
+#PBS -l walltime=24:00:00
+#PBS -l select=1:ncpus=36:mem=250gb:ngpus=1
+
+# Submit with: qsub airimu_scratch.pbs
+
+set -e
+
+cd $PBS_O_WORKDIR
+
+module load apptainer/1.4.1
+
+image=/app1/common/singularity-img/vanda/pytorch_2.5_cuda_12.4_unsloth.sif
+
+stage1_config=configs/exp/TLab/4th_Nov_Scratch.conf
+stage2_config=configs/exp/TLab/4th_Nov_Scratch_stage2.conf
+
+run_timestamp=$(TZ=Asia/Singapore date +%Y%m%d_%H%M%S_SGT)
+job_id=${PBS_JOBID%%.*}
+run_root="experiments/${run_timestamp}_job${job_id}/scratch"
+stage1_exp="$run_root/stage1"
+stage2_exp="$run_root/stage2"
+
+echo "Training mode: scratch"
+echo "Run root: $run_root"
+
+echo "Working directory:"
+pwd
+
+echo "Compute node:"
+hostname
+
+echo "GPU:"
+nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
+
+echo "Starting AirIMU Stage 1 from scratch (covaug=False)"
+
+apptainer exec --nv -e $image \
+python3 -u train_motion_finetune.py \
+--config "$stage1_config" \
+--exp_dir "$stage1_exp" \
+--pretrained_ckpt none \
+--device cuda:0
+
+echo "Stage 1 finished. Starting Stage 2 (covaug=True)"
+
+if [[ ! -f "$stage1_exp/ckpt/best_model.ckpt" ]]; then
+    echo "ERROR: Stage 1 completed without best_model.ckpt" >&2
+    exit 3
+fi
+
+apptainer exec --nv -e $image \
+python3 -u train_motion_finetune.py \
+--config "$stage2_config" \
+--exp_dir "$stage2_exp" \
+--pretrained_ckpt "$stage1_exp/ckpt/best_model.ckpt" \
+--device cuda:0
+
+echo "Stage 2 finished. Running inference and evaluation"
+
+if [[ ! -f "$stage2_exp/ckpt/best_model.ckpt" ]]; then
+    echo "ERROR: Stage 2 completed without an eligible best_model.ckpt" >&2
+    exit 4
+fi
+
+apptainer exec --nv -e $image \
+python3 -u inference.py \
+--config "$stage2_config" \
+--exp_dir "$stage2_exp" \
+--device cuda:0
+
+apptainer exec -e $image \
+python3 -u evaluation/evaluate_state.py \
+--dataconf configs/datasets/TLab/tlab_body.conf \
+--exp "$stage2_exp" \
+--savedir "$stage2_exp/evaluation_results"
+
+echo "Inference and evaluation finished. Exporting the best model to ONNX"
+
+apptainer exec -e $image \
+python3 -u export_onnx_fp32.py \
+--config "$stage2_config" \
+--ckpt "$stage2_exp/ckpt/best_model.ckpt" \
+--onnx "$stage2_exp/airimu_cpu_fp32_scratch.onnx" \
+--torch "$stage2_exp/airimu_cpu_fp32.pt" \
+--num-imu-frames 200
+
+echo "AirIMU scratch training and ONNX export finished"
