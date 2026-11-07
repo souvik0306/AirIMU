@@ -215,10 +215,18 @@ if __name__ == "__main__":
         action="store_false",
         help="disable wandb logging",
     )
+    parser.add_argument(
+        "--max_epoches",
+        type=int,
+        default=None,
+        help="override train.max_epoches from the config",
+    )
 
     args = parser.parse_args()
     print(args)
     conf = ConfigFactory.parse_file(args.config)
+    if args.max_epoches is not None:
+        conf.train.max_epoches = args.max_epoches
 
     conf.train.device = args.device
     is_stage2 = "stage" in conf.train and conf.train.stage == 2
@@ -313,7 +321,7 @@ if __name__ == "__main__":
     best_vel_rmse = float("inf")
     epoch = 0
     if is_stage2:
-        best_vel_nll = float("inf")
+        best_loss = float("inf")
         vel_limit = conf.train.stage1_vel_ref * (1.0 + conf.train.vel_degradation_limit)
     else:
         rot_limit = conf.train.rot_limit if "rot_limit" in conf.train else float("inf")
@@ -326,7 +334,7 @@ if __name__ == "__main__":
             )
             epoch = loaded_epoch + 1
             if is_stage2:
-                best_vel_nll = loaded_best
+                best_loss = loaded_best
             else:
                 best_vel_rmse = loaded_best
         else:
@@ -370,26 +378,25 @@ if __name__ == "__main__":
     if is_stage2:
         initial_nll = extract_nll_metrics(initial_test_loss)
         initial_vel_rmse = initial_eval_state['loss']['vel'].mean().item()
-        initial_vel_nll = initial_nll["vel_nll"]
-        if isinstance(initial_vel_nll, torch.Tensor): initial_vel_nll = initial_vel_nll.item()
-        if initial_vel_rmse <= vel_limit and initial_vel_nll < best_vel_nll:
-            best_vel_nll = initial_vel_nll
+        initial_loss = initial_test_loss['loss']
+        if initial_vel_rmse <= vel_limit and initial_loss < best_loss:
+            best_loss = initial_loss
             save_best_ckpt(
                 network,
                 optimizer,
                 scheduler,
                 epoch - 1,
-                best_vel_nll,
+                best_loss,
                 conf,
             )
             print(
                 "Saved eligible Stage 2 baseline as best model: "
-                "vel_rmse = %.6f, vel_nll = %.6f"
-                % (initial_vel_rmse, initial_vel_nll)
+                "vel_rmse = %.6f, loss = %.6f, vel_nll = %.6f"
+                % (initial_vel_rmse, initial_loss, initial_nll["vel_nll"])
             )
         print(
-            "Stage 2 baseline: vel_rmse = %.6f, vel_nll = %.6f"
-            % (initial_vel_rmse, initial_vel_nll)
+            "Stage 2 baseline: vel_rmse = %.6f, loss = %.6f, vel_nll = %.6f"
+            % (initial_vel_rmse, initial_loss, initial_nll["vel_nll"])
         )
         if args.log:
             write_wandb("monitor/vel_rmse", initial_vel_rmse, initial_step)
@@ -417,23 +424,21 @@ if __name__ == "__main__":
             val_vel_rmse = eval_state['loss']['vel'].mean().item()
             vel_nll = nll_metrics["vel_nll"]
             cov_nll = nll_metrics["cov_nll"]
-            if isinstance(vel_nll, torch.Tensor): vel_nll = vel_nll.item()
-            if isinstance(cov_nll, torch.Tensor): cov_nll = cov_nll.item()
             if args.log:
                 write_wandb("monitor/vel_rmse", val_vel_rmse, log_step)
                 write_wandb("nll", nll_metrics, log_step)
-            scheduler.step(vel_nll)
-            if vel_nll < best_vel_nll and val_vel_rmse <= vel_limit:
-                best_vel_nll = vel_nll
+            scheduler.step(test_loss['loss'])
+            if test_loss['loss'] < best_loss and val_vel_rmse <= vel_limit:
+                best_loss = test_loss['loss']
                 save_best = True
                 print(
                     "Saving best Stage 2 model: "
-                    "vel_rmse = %.6f, vel_nll = %.6f, cov_nll = %.6f"
-                    % (val_vel_rmse, vel_nll, cov_nll)
+                    "vel_rmse = %.6f, loss = %.6f, vel_nll = %.6f, cov_nll = %.6f"
+                    % (val_vel_rmse, best_loss, vel_nll, cov_nll)
                 )
             else:
                 save_best = False
-            save_ckpt(network, optimizer, scheduler, epoch_i, best_vel_nll, conf, save_best=save_best)
+            save_ckpt(network, optimizer, scheduler, epoch_i, best_loss, conf, save_best=save_best)
         else:
             val_vel_rmse = eval_state['loss']['vel'].mean().item()
             val_rot_rmse = eval_state['loss']['rot'].mean().item()
@@ -451,7 +456,7 @@ if __name__ == "__main__":
 
     if args.log:
         if is_stage2:
-            upload_best_ckpt_artifact(conf, best_vel_nll)
+            upload_best_ckpt_artifact(conf, best_loss)
         else:
             upload_best_ckpt_artifact(conf, best_vel_rmse)
         wandb.finish()

@@ -60,6 +60,7 @@ python3 -u train_motion_finetune.py \
     --config "$STAGE2_CONFIG" \
     --exp_dir "$STAGE2_EXP" \
     --pretrained_ckpt "$STAGE1_EXP/ckpt/best_model.ckpt" \
+    --non_strict_pretrained \
     --device "$DEVICE"
 
 if [[ ! -f "$STAGE2_EXP/ckpt/best_model.ckpt" ]]; then

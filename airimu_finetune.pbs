@@ -58,6 +58,7 @@ python3 -u train_motion_finetune.py \
 --config "$stage2_config" \
 --exp_dir "$stage2_exp" \
 --pretrained_ckpt "$stage1_exp/ckpt/best_model.ckpt" \
+--non_strict_pretrained \
 --device cuda:0
 
 echo "Stage 2 finished. Running inference and evaluation"

@@ -88,6 +88,17 @@ class CodeNet(ModelBase):
         self.gyrodecoder = nn.Sequential(nn.Linear(256, 128), nn.GELU(), nn.Linear(128, 3))
         self.gyrocov_decoder = nn.Sequential(nn.Linear(256, 128), nn.GELU(), nn.Linear(128, 3))
 
+        # Lets the covariance heads scale their output by how much bias the
+        # correction network thinks it just removed, without ever feeding the
+        # correction itself downstream (the deployed EKF only consumes raw
+        # acc/gyro + this covariance). Zero-initialized so Stage 2 starts out
+        # identical to the plain sigmoid-bounded heads and only learns to use
+        # this signal if it actually helps the NLL.
+        self.acc_bias_gain = nn.Linear(3, 3, bias=False)
+        self.gyro_bias_gain = nn.Linear(3, 3, bias=False)
+        nn.init.zeros_(self.acc_bias_gain.weight)
+        nn.init.zeros_(self.gyro_bias_gain.weight)
+
         self.reset_cov_heads()
 
     def reset_cov_heads(self):
@@ -117,13 +128,20 @@ class CodeNet(ModelBase):
 
         return x
 
-    def cov_decoder(self, x):
+    def cov_decoder(self, x, correction):
+        # correction is detached: it only informs the covariance heads of the
+        # estimated bias magnitude, it must not let the covariance loss steer
+        # the correction network (that is the state loss's job alone).
+        correction = correction.detach()
+        acc_logit = self.acccov_decoder(x) + self.acc_bias_gain(correction[..., :3])
+        gyro_logit = self.gyrocov_decoder(x) + self.gyro_bias_gain(correction[..., 3:])
+
         # Bounded sigmoid parameterization: variance is always within
         # [cov_min, cov_max] regardless of the raw network output, so the
         # model cannot drive uncertainty above the sensor's physical noise
         # floor to minimize the NLL loss.
-        acc = self.acc_cov_min + (self.acc_cov_max - self.acc_cov_min) * torch.sigmoid(self.acccov_decoder(x))
-        gyro = self.gyro_cov_min + (self.gyro_cov_max - self.gyro_cov_min) * torch.sigmoid(self.gyrocov_decoder(x))
+        acc = self.acc_cov_min + (self.acc_cov_max - self.acc_cov_min) * torch.sigmoid(acc_logit)
+        gyro = self.gyro_cov_min + (self.gyro_cov_max - self.gyro_cov_min) * torch.sigmoid(gyro_logit)
 
         return torch.cat([acc, gyro], dim = -1)
 
@@ -205,7 +223,7 @@ class CodeNet(ModelBase):
         # covariance propagation
         cov_state = {'acc_cov':None, 'gyro_cov': None,}
         if self.conf.propcov:
-            cov = self.cov_decoder(feature)
+            cov = self.cov_decoder(feature, correction)
             cov_state['acc_cov'] = self._update(torch.zeros_like(correction_acc, device=correction_acc.device),
                                                 cov[...,:3], frame_len)
             cov_state['gyro_cov'] = self._update(torch.zeros_like(correction_gyro, device=correction_gyro.device),
@@ -252,6 +270,18 @@ class CodeNet(ModelBase):
         }
 
         if self.conf.propcov:
+            # Covariance must be supervised against the *raw* (uncorrected) IMU
+            # drift, not the corrected signal: deployment feeds raw acc/gyro plus
+            # this learned covariance straight into the EKF, never the correction
+            # itself, so the covariance has to characterize the error the EKF will
+            # actually see. The bias-correction knowledge instead reaches the
+            # covariance heads through cov_decoder's acc/gyro_bias_gain (see
+            # inference()), which conditions the predicted variance on the
+            # detected bias magnitude without altering what's fed downstream.
+            # use_gtrot=False (own rotation estimate, no ground-truth gravity
+            # compensation) matches the deployment condition (gtrot is forced off
+            # in export/inference), so the calibrated uncertainty stays valid
+            # outside of training.
             raw_data = dict(data)
             raw_data['corrected_acc'] = data['acc'][:, self.interval:, :]
             raw_data['corrected_gyro'] = data['gyro'][:, self.interval:, :]
@@ -290,7 +320,7 @@ class CodePoseNet(CodeNet):
         # covariance propagation
         cov_state = {'acc_cov':None, 'gyro_cov': None,}
         if self.conf.propcov:
-            cov = self.cov_decoder(feature)
+            cov = self.cov_decoder(feature, correction)
             cov_state['acc_cov'] = self._update(torch.zeros_like(correction_acc, device=correction_acc.device),
                                                 cov[...,:3], frame_len)
             cov_state['gyro_cov'] = self._update(torch.zeros_like(correction_gyro, device=correction_gyro.device),

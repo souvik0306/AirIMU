@@ -18,6 +18,14 @@ image=/app1/common/singularity-img/vanda/pytorch_2.5_cuda_12.4_unsloth.sif
 stage1_config=configs/exp/TLab/4th_Nov_Scratch.conf
 stage2_config=configs/exp/TLab/4th_Nov_Scratch_stage2.conf
 
+# Optional: qsub -v MAX_EPOCHES=15 airimu_scratch.pbs to shorten both stages
+# for a quick validation run. Unset by default so a bare `qsub` keeps the
+# config's own max_epoches.
+max_epoches_args=()
+if [[ -n "${MAX_EPOCHES:-}" ]]; then
+    max_epoches_args=(--max_epoches "$MAX_EPOCHES")
+fi
+
 run_timestamp=$(TZ=Asia/Singapore date +%Y%m%d_%H%M%S_SGT)
 job_id=${PBS_JOBID%%.*}
 run_root="experiments/${run_timestamp}_job${job_id}/scratch"
@@ -43,7 +51,8 @@ python3 -u train_motion_finetune.py \
 --config "$stage1_config" \
 --exp_dir "$stage1_exp" \
 --pretrained_ckpt none \
---device cuda:0
+--device cuda:0 \
+"${max_epoches_args[@]}"
 
 echo "Stage 1 finished. Starting Stage 2 (covaug=True)"
 
@@ -57,7 +66,9 @@ python3 -u train_motion_finetune.py \
 --config "$stage2_config" \
 --exp_dir "$stage2_exp" \
 --pretrained_ckpt "$stage1_exp/ckpt/best_model.ckpt" \
---device cuda:0
+--non_strict_pretrained \
+--device cuda:0 \
+"${max_epoches_args[@]}"
 
 echo "Stage 2 finished. Running inference and evaluation"
 

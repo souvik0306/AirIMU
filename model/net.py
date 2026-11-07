@@ -56,8 +56,8 @@ class ModelBase(nn.Module):
                 selected_data = self._select(data, start, end)
                 selected_cov_state = self._select(cov_state, start, end)
 
-                # take the init sate from last frame as the init state of the next frame
                 if inte_state is not None:
+                    # take the init sate from last frame as the init state of the next frame
                     init_state = {
                         "pos": inte_state["pos"][:,-1:,:],
                         "vel": inte_state["vel"][:,-1:,:],
