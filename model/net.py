@@ -38,8 +38,13 @@ class ModelBase(nn.Module):
             use_gtrot = self.conf.gtrot
         if propagate_cov is None:
             propagate_cov = self.conf.propcov
+        # ``self.integrator`` is constructed with covariance support when a
+        # run may enable it later (for example, the Stage 1 epoch schedule).
+        # Bypass its covariance path explicitly while covariance is disabled;
+        # checking the mutable config here would incorrectly invoke the
+        # covariance-enabled integrator with ``None`` covariance inputs.
         integrator = self.integrator
-        if self.conf.propcov and not propagate_cov:
+        if not propagate_cov:
             integrator = self._integrate_without_cov
 
         gt_rot = None

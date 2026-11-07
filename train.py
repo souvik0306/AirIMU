@@ -24,6 +24,9 @@ class _LossMetrics:
     def __init__(self, propcov, uncertainty_keys=()):
         self.sources = {
             'loss': 'loss', 'pos_loss': 'pos', 'rot_loss': 'rot', 'vel_loss': 'vel',
+            'corrected_pos_rmse': 'corrected_pos_rmse',
+            'corrected_rot_rmse': 'corrected_rot_rmse',
+            'corrected_vel_rmse': 'corrected_vel_rmse',
         }
         if propcov:
             self.sources.update({key: key for key in (
@@ -50,12 +53,53 @@ class _LossMetrics:
         return result
 
 
+def print_corrected_calibration_metrics(split, metrics, propcov):
+    """Print Stage 1 trajectory and calibration metrics to the job log."""
+    print(
+        f"{split} corrected trajectory metrics: "
+        f"pos_rmse={metrics['corrected_pos_rmse']:.6f}, "
+        f"vel_rmse={metrics['corrected_vel_rmse']:.6f}, "
+        f"rot_rmse={metrics['corrected_rot_rmse']:.6f}"
+    )
+    if not propcov:
+        print(f"{split} corrected covariance metrics: disabled by epoch schedule")
+        return
+
+    corrected_covariance_keys = (
+        'corrected_pos_nll', 'corrected_vel_nll', 'corrected_rot_nll',
+        'corrected_cov_nll', 'corrected_vel_nees', 'corrected_vel_1sigma',
+        'corrected_vel_2sigma',
+    )
+    if not all(key in metrics for key in corrected_covariance_keys):
+        # Stage 2 retains its existing raw-covariance metric names.
+        return
+
+    print(
+        f"{split} corrected covariance metrics: "
+        f"pos_nll={metrics['corrected_pos_nll']:.6f}, "
+        f"vel_nll={metrics['corrected_vel_nll']:.6f}, "
+        f"rot_nll={metrics['corrected_rot_nll']:.6f}, "
+        f"full_nll={metrics['corrected_cov_nll']:.6f}, "
+        f"vel_nees={metrics['corrected_vel_nees']:.6f}, "
+        f"vel_1sigma={metrics['corrected_vel_1sigma']:.6f}, "
+        f"vel_2sigma={metrics['corrected_vel_2sigma']:.6f}"
+    )
+
+
 def train(network, loader, confs, epoch, optimizer):
     """Train for one epoch, transferring scalar metrics only when reporting."""
     network.train()
-    metrics = _LossMetrics(confs.propcov, (
-        'raw_vel_rmse', 'vel_nees', 'vel_1sigma', 'vel_2sigma', 'vel_nll',
-    ))
+    if confs.get('stage', 1) == 2:
+        uncertainty_keys = (
+            'raw_vel_rmse', 'vel_nees', 'vel_1sigma', 'vel_2sigma', 'vel_nll',
+        )
+    else:
+        uncertainty_keys = (
+            'corrected_pos_nll', 'corrected_vel_nll', 'corrected_rot_nll',
+            'corrected_cov_nll', 'corrected_vel_nees',
+            'corrected_vel_1sigma', 'corrected_vel_2sigma',
+        )
+    metrics = _LossMetrics(confs.propcov, uncertainty_keys)
     output_metrics = OutputMetrics()
     log_interval = max(1, int(confs.get('log_interval', 10)))
 
@@ -89,6 +133,7 @@ def train(network, loader, confs, epoch, optimizer):
                 t_range.set_description(description, refresh=False)
 
     result = metrics.averages()
+    print_corrected_calibration_metrics('TRAIN', result, confs.propcov)
     result.update(output_metrics.summarize('TRAIN', epoch=epoch + 1, propcov=confs.propcov))
     return result
 
@@ -96,10 +141,18 @@ def train(network, loader, confs, epoch, optimizer):
 def test(network, loader, confs, epoch=None):
     network.eval()
     output_metrics = OutputMetrics()
-    metrics = _LossMetrics(confs.propcov, (
-        'raw_vel_rmse', 'vel_nees', 'vel_1sigma', 'vel_2sigma',
-        'rot_nll', 'vel_nll', 'pos_nll', 'cov_nll',
-    ))
+    if confs.get('stage', 1) == 2:
+        uncertainty_keys = (
+            'raw_vel_rmse', 'vel_nees', 'vel_1sigma', 'vel_2sigma',
+            'rot_nll', 'vel_nll', 'pos_nll', 'cov_nll',
+        )
+    else:
+        uncertainty_keys = (
+            'corrected_pos_nll', 'corrected_vel_nll', 'corrected_rot_nll',
+            'corrected_cov_nll', 'corrected_vel_nees',
+            'corrected_vel_1sigma', 'corrected_vel_2sigma',
+        )
+    metrics = _LossMetrics(confs.propcov, uncertainty_keys)
     log_interval = max(1, int(confs.get('log_interval', 10)))
     acc_covs, gyro_covs = [], []
 
@@ -132,6 +185,7 @@ def test(network, loader, confs, epoch=None):
             gyro_covs = torch.cat(gyro_covs)
 
     result = metrics.averages()
+    print_corrected_calibration_metrics('VALIDATION', result, confs.propcov)
     result.update({'acc_covs': acc_covs, 'gyro_covs': gyro_covs})
     result.update(output_metrics.summarize('VALIDATION', epoch=epoch, propcov=confs.propcov))
     return result
@@ -171,40 +225,68 @@ def log_used_data_paths(conf):
     wandb.log({"data/used_paths": table})
 
 
-def save_best_ckpt(network, optimizer, scheduler, epoch_i, test_loss, conf):
-    print("saving the best model", test_loss)
-    best_ckpt_path = os.path.join(conf.general.exp_dir, "ckpt/best_model.ckpt")
-    torch.save({
+def save_best_ckpt(
+    network,
+    optimizer,
+    scheduler,
+    epoch_i,
+    test_loss,
+    conf,
+    checkpoint_name="best_model.ckpt",
+    metric_name="best_loss",
+    extra_state=None,
+):
+    print(f"saving {checkpoint_name}: {metric_name}={test_loss}")
+    best_ckpt_path = os.path.join(conf.general.exp_dir, "ckpt", checkpoint_name)
+    checkpoint = {
         'epoch': epoch_i,
         'model_state_dict': network.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'best_loss': test_loss,
-    }, best_ckpt_path)
+        'metric_name': metric_name,
+        'metric_value': test_loss,
+    }
+    if extra_state:
+        checkpoint.update(extra_state)
+    torch.save(checkpoint, best_ckpt_path)
 
 
-def save_ckpt(network, optimizer, scheduler, epoch_i, test_loss, conf, save_best = False):
+def save_ckpt(
+    network,
+    optimizer,
+    scheduler,
+    epoch_i,
+    test_loss,
+    conf,
+    save_best=False,
+    extra_state=None,
+):
+    checkpoint = {
+        'epoch': epoch_i,
+        'model_state_dict': network.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'best_loss': test_loss,
+    }
+    if extra_state:
+        checkpoint.update(extra_state)
+
     if epoch_i%conf.train.save_freq==conf.train.save_freq-1:
-        torch.save({
-        'epoch': epoch_i,
-        'model_state_dict': network.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
-        'best_loss': test_loss,
-        }, os.path.join(conf.general.exp_dir, "ckpt/%04d.ckpt"%epoch_i))
+        torch.save(
+            checkpoint,
+            os.path.join(conf.general.exp_dir, "ckpt/%04d.ckpt" % epoch_i),
+        )
 
     if save_best:
         save_best_ckpt(
             network, optimizer, scheduler, epoch_i, test_loss, conf
         )
 
-    torch.save({
-        'epoch': epoch_i,
-        'model_state_dict': network.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
-        'best_loss': test_loss,
-        }, os.path.join(conf.general.exp_dir, "ckpt/newest.ckpt"))
+    torch.save(
+        checkpoint,
+        os.path.join(conf.general.exp_dir, "ckpt/newest.ckpt"),
+    )
 
 
 def upload_best_ckpt_artifact(conf, best_loss):

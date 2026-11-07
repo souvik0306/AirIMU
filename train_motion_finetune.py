@@ -34,7 +34,7 @@ def torch_load(path, device):
 def load_pretrained_model(network, ckpt_path, device, strict=True):
     if ckpt_path is None or str(ckpt_path).lower() in ("", "none", "false"):
         print("No pretrained checkpoint configured; training from scratch.")
-        return
+        return False
     if not os.path.isfile(ckpt_path):
         raise FileNotFoundError(
             f"Pretrained checkpoint was not found: {ckpt_path}. "
@@ -48,6 +48,36 @@ def load_pretrained_model(network, ckpt_path, device, strict=True):
     if not strict:
         print(f"missing keys: {load_result.missing_keys}")
         print(f"unexpected keys: {load_result.unexpected_keys}")
+    return True
+
+
+def covariance_weight(epoch):
+    """Stage 1 covariance-loss multiplier for a zero-based epoch."""
+    schedule = {8: 0.1, 9: 0.3, 10: 0.6, 11: 1.0}
+    if epoch < 8:
+        return 0.0
+    return schedule.get(epoch, 1.0)
+
+
+def configure_stage1_covariance(
+    network, confs, epoch, base_cov_weight, covariance_heads_initialized
+):
+    """Apply the Stage 1 activation schedule before an epoch or validation."""
+    multiplier = covariance_weight(epoch)
+    enabled = multiplier > 0.0
+    if enabled and not covariance_heads_initialized:
+        network.reset_cov_heads()
+        covariance_heads_initialized = True
+        print("Initialized Stage 1 covariance heads before their first training epoch.")
+
+    confs.propcov = enabled
+    confs.cov_weight = base_cov_weight * multiplier
+    print(
+        "Stage 1 covariance schedule: epoch %d, enabled=%s, "
+        "multiplier=%.1f, effective_weight=%.12g"
+        % (epoch + 1, enabled, multiplier, confs.cov_weight)
+    )
+    return covariance_heads_initialized, multiplier
 
 
 def resolve_stage1_vel_ref(conf, pretrained_override=None):
@@ -69,12 +99,18 @@ def resolve_stage1_vel_ref(conf, pretrained_override=None):
             )
 
         checkpoint = torch_load(ckpt_path, "cpu")
-        if "best_loss" not in checkpoint:
+        reference_key = (
+            "best_corrected_vel_rmse"
+            if "best_corrected_vel_rmse" in checkpoint
+            else "best_loss"
+        )
+        if reference_key not in checkpoint:
             raise KeyError(
-                f"Cannot resolve Stage 1 velocity reference; {ckpt_path} has no best_loss."
+                f"Cannot resolve Stage 1 velocity reference; {ckpt_path} has no "
+                "best_corrected_vel_rmse or best_loss."
             )
-        stage1_vel_ref = float(checkpoint["best_loss"])
-        source = f"{ckpt_path}:best_loss"
+        stage1_vel_ref = float(checkpoint[reference_key])
+        source = f"{ckpt_path}:{reference_key}"
 
     if not np.isfinite(stage1_vel_ref) or stage1_vel_ref < 0:
         raise ValueError(
@@ -93,7 +129,7 @@ def load_resume_state(network, optimizer, scheduler, ckpt_path, device):
     epoch = checkpoint["epoch"]
     best_loss = checkpoint["best_loss"]
     print(f"resumed {ckpt_path} with best_loss {best_loss:f}")
-    return epoch, best_loss
+    return epoch, best_loss, checkpoint.get("best_cov_nll", float("inf"))
 
 
 NLL_KEYS = ("rot_nll", "vel_nll", "pos_nll", "cov_nll")
@@ -139,6 +175,11 @@ def log_validation_metrics(network, test_loader, eval_loader, conf, log_enabled,
     print("test loss: %f" % (test_loss["loss"]))
     if log_enabled:
         write_wandb("test", test_loss, step)
+        corrected_metrics = {
+            key: value for key, value in test_loss.items()
+            if key.startswith("corrected_") and isinstance(value, float)
+        }
+        write_wandb("validation", corrected_metrics, step)
 
     eval_state = None
     if step % conf.train.eval_freq == conf.train.eval_freq - 1:
@@ -236,6 +277,11 @@ if __name__ == "__main__":
         conf.train.stage1_vel_ref = resolve_stage1_vel_ref(
             conf, pretrained_override=args.pretrained_ckpt
         )
+    else:
+        # Stage 1 starts with covariance disabled at runtime, but its shared
+        # preintegrator must be constructed with covariance support so epoch 9
+        # can activate propagation without rebuilding the model.
+        conf.train.propcov = True
     conf_name = os.path.split(args.config)[-1].split(".")[0]
     if "general" not in conf:
         conf["general"] = ConfigTree()
@@ -308,6 +354,7 @@ if __name__ == "__main__":
     network = net_dict[conf.train.network](conf.train).to(
         device=args.device, dtype=train_dataset.get_dtype()
     )
+    base_cov_weight = float(conf.train.get("cov_weight", 0.0))
     optimizer = torch.optim.Adam(
         network.parameters(), lr=conf.train.lr, weight_decay=conf.train.weight_decay
     )
@@ -319,7 +366,14 @@ if __name__ == "__main__":
         min_lr=conf.train.min_lr,
     )
     best_vel_rmse = float("inf")
+    best_cov_nll = float("inf")
     epoch = 0
+    resumed = False
+    pretrained_loaded = False
+    # Fresh models initialize these heads in CodeNet.__init__. A legacy
+    # correction-only checkpoint overwrites that initialization, so it is
+    # re-seeded once immediately before epoch 9.
+    covariance_heads_initialized = True
     if is_stage2:
         best_loss = float("inf")
         vel_limit = conf.train.stage1_vel_ref * (1.0 + conf.train.vel_degradation_limit)
@@ -329,20 +383,27 @@ if __name__ == "__main__":
     resume_path = os.path.join(conf.general.exp_dir, "ckpt/newest.ckpt")
     if args.load_ckpt:
         if os.path.isfile(resume_path):
-            loaded_epoch, loaded_best = load_resume_state(
+            loaded_epoch, loaded_best, loaded_best_cov_nll = load_resume_state(
                 network, optimizer, scheduler, resume_path, args.device
             )
+            resumed = True
             epoch = loaded_epoch + 1
             if is_stage2:
                 best_loss = loaded_best
             else:
                 best_vel_rmse = loaded_best
+                best_cov_nll = loaded_best_cov_nll
+                # A checkpoint from before epoch 9 has never trained its
+                # covariance heads. Re-seed them once at activation; never
+                # reset a checkpoint that has already entered covariance
+                # training.
+                covariance_heads_initialized = loaded_epoch >= 8
         else:
             print("Can't find the finetuning checkpoint; loading pretrained weights.")
             pretrained_ckpt = args.pretrained_ckpt
             if pretrained_ckpt is None and "pretrained_ckpt" in conf.train:
                 pretrained_ckpt = conf.train.pretrained_ckpt
-            load_pretrained_model(
+            pretrained_loaded = load_pretrained_model(
                 network,
                 pretrained_ckpt,
                 args.device,
@@ -356,7 +417,7 @@ if __name__ == "__main__":
         pretrained_ckpt = args.pretrained_ckpt
         if pretrained_ckpt is None and "pretrained_ckpt" in conf.train:
             pretrained_ckpt = conf.train.pretrained_ckpt
-        load_pretrained_model(
+        pretrained_loaded = load_pretrained_model(
             network,
             pretrained_ckpt,
             args.device,
@@ -364,6 +425,17 @@ if __name__ == "__main__":
         )
         if is_stage2:
             network.reset_cov_heads()
+
+    if not is_stage2:
+        if pretrained_loaded and not resumed:
+            covariance_heads_initialized = False
+        covariance_heads_initialized, _ = configure_stage1_covariance(
+            network,
+            conf.train,
+            epoch,
+            base_cov_weight,
+            covariance_heads_initialized,
+        )
 
     initial_step = epoch
     initial_test_loss, initial_eval_state = log_validation_metrics(
@@ -403,6 +475,14 @@ if __name__ == "__main__":
             write_wandb("nll", initial_nll, initial_step)
 
     for epoch_i in range(epoch, conf.train.max_epoches):
+        if not is_stage2:
+            covariance_heads_initialized, cov_weight_multiplier = configure_stage1_covariance(
+                network,
+                conf.train,
+                epoch_i,
+                base_cov_weight,
+                covariance_heads_initialized,
+            )
         train_loss = train(network, train_loader, conf.train, epoch_i, optimizer)
         log_step = epoch_i + 1
         test_loss, eval_state = log_validation_metrics(
@@ -418,6 +498,17 @@ if __name__ == "__main__":
         if args.log:
             write_wandb("train", train_loss, log_step)
             write_wandb("lr", scheduler.optimizer.param_groups[0]["lr"], log_step)
+            if not is_stage2:
+                write_wandb(
+                    "schedule/covariance_weight_multiplier",
+                    cov_weight_multiplier,
+                    log_step,
+                )
+                write_wandb(
+                    "schedule/effective_covariance_weight",
+                    float(conf.train.cov_weight),
+                    log_step,
+                )
 
         if is_stage2:
             nll_metrics = extract_nll_metrics(test_loss)
@@ -440,19 +531,71 @@ if __name__ == "__main__":
                 save_best = False
             save_ckpt(network, optimizer, scheduler, epoch_i, best_loss, conf, save_best=save_best)
         else:
-            val_vel_rmse = eval_state['loss']['vel'].mean().item()
-            val_rot_rmse = eval_state['loss']['rot'].mean().item()
+            if eval_state is not None:
+                val_vel_rmse = eval_state['loss']['vel'].mean().item()
+                val_rot_rmse = eval_state['loss']['rot'].mean().item()
+            else:
+                val_vel_rmse = test_loss['corrected_vel_rmse']
+                val_rot_rmse = test_loss['corrected_rot_rmse']
             scheduler.step(val_vel_rmse)
             if val_vel_rmse < best_vel_rmse and val_rot_rmse < rot_limit:
                 best_vel_rmse = val_vel_rmse
-                save_best = True
+                save_best_corrected = True
                 print(
                     "Saving best Stage 1 model: vel_rmse = %.6f, rot_rmse = %.6f"
                     % (val_vel_rmse, val_rot_rmse)
                 )
             else:
-                save_best = False
-            save_ckpt(network, optimizer, scheduler, epoch_i, best_vel_rmse, conf, save_best=save_best)
+                save_best_corrected = False
+
+            if save_best_corrected:
+                save_best_ckpt(
+                    network, optimizer, scheduler, epoch_i, best_vel_rmse, conf,
+                    checkpoint_name="best_corrected_model.ckpt",
+                    metric_name="corrected_vel_rmse",
+                    extra_state={"best_corrected_vel_rmse": best_vel_rmse},
+                )
+                # Keep the established path as a compatibility alias for
+                # existing scripts; the explicit filename above is canonical.
+                save_best_ckpt(
+                    network, optimizer, scheduler, epoch_i, best_vel_rmse, conf,
+                    checkpoint_name="best_model.ckpt",
+                    metric_name="corrected_vel_rmse",
+                    extra_state={"best_corrected_vel_rmse": best_vel_rmse},
+                )
+
+            if conf.train.propcov:
+                val_cov_nll = test_loss['corrected_cov_nll']
+                if val_cov_nll < best_cov_nll:
+                    best_cov_nll = val_cov_nll
+                    print(
+                        "Saving best calibrated Stage 1 model: "
+                        "corrected_cov_nll = %.6f" % best_cov_nll
+                    )
+                    save_best_ckpt(
+                        network, optimizer, scheduler, epoch_i, best_cov_nll, conf,
+                        checkpoint_name="best_covariance_model.ckpt",
+                        metric_name="corrected_cov_nll",
+                        extra_state={
+                            # Stage 2's velocity guard still needs the best
+                            # corrected-trajectory reference even when this
+                            # calibration-selected checkpoint is loaded.
+                            "best_loss": best_vel_rmse,
+                            "best_corrected_vel_rmse": best_vel_rmse,
+                            "best_cov_nll": best_cov_nll,
+                        },
+                    )
+
+            save_ckpt(
+                network,
+                optimizer,
+                scheduler,
+                epoch_i,
+                best_vel_rmse,
+                conf,
+                save_best=False,
+                extra_state={"best_cov_nll": best_cov_nll},
+            )
 
     if args.log:
         if is_stage2:

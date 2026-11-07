@@ -253,10 +253,17 @@ class CodeNet(ModelBase):
         data['corrected_acc'] = data['acc'][:,self.interval:,:] + inference_state['correction_acc']
         data['corrected_gyro'] = data['gyro'][:,self.interval:,:] + inference_state['correction_gyro']
 
-        # Only the raw integration below supplies covariance to the loss.
+        is_stage2 = self.conf.get('stage', 1) == 2
+
+        # Stage 1 learns a corrected trajectory and the uncertainty of that
+        # same trajectory. Ground-truth orientation is used only through the
+        # supplied initial state; every subsequent orientation is propagated
+        # from the corrected gyroscope.
         out_state = self.integrate(
             init_state=init_state, data=data,
-            cov_state=inference_state['cov_state'], propagate_cov=False,
+            cov_state=inference_state['cov_state'],
+            use_gtrot=False if not is_stage2 else None,
+            propagate_cov=self.conf.propcov if not is_stage2 else False,
         )
 
         result = {
@@ -269,7 +276,12 @@ class CodeNet(ModelBase):
             'corrected_gyro': data['corrected_gyro'],
         }
 
-        if self.conf.propcov:
+        if self.conf.propcov and not is_stage2:
+            result['cov'] = out_state['cov']
+            result['acc_cov'] = inference_state['cov_state']['acc_cov']
+            result['gyro_cov'] = inference_state['cov_state']['gyro_cov']
+
+        if self.conf.propcov and is_stage2:
             # Covariance must be supervised against the *raw* (uncorrected) IMU
             # drift, not the corrected signal: deployment feeds raw acc/gyro plus
             # this learned covariance straight into the EKF, never the correction
