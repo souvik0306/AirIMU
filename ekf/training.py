@@ -1,0 +1,106 @@
+"""AirIMU covariance-only training through an entire aided/unaided replay."""
+
+import torch
+from torch import nn
+
+from .eskf import DifferentiableESKF
+
+
+def horizontal_velocity_loss(velocity_est, vicon_velocity_gt, evaluation_mask):
+    """Mean squared horizontal speed-vector error (sum xy, then mean time)."""
+    if (velocity_est.ndim != 2 or velocity_est.shape[-1] != 3
+            or vicon_velocity_gt.shape != velocity_est.shape):
+        raise ValueError("Estimated and ground-truth velocity must both have shape [N,3].")
+    if evaluation_mask.dtype != torch.bool or evaluation_mask.shape != velocity_est.shape[:1]:
+        raise ValueError("evaluation_mask must be a boolean vector with shape [N].")
+    if not bool(evaluation_mask.any()):
+        raise ValueError("The velocity evaluation interval contains no samples.")
+    residual = velocity_est[evaluation_mask, :2] - vicon_velocity_gt[evaluation_mask, :2]
+    if not bool(torch.isfinite(residual).all()):
+        raise ValueError("Evaluation velocities must be finite.")
+    return residual.square().sum(dim=-1).mean()
+
+
+def velocity_evaluation_mask(imu_time, cutoff_timestamp):
+    """Require coverage of [cutoff+5, cutoff+25] seconds, including endpoints."""
+    start, end = float(cutoff_timestamp) + 5., float(cutoff_timestamp) + 25.
+    if imu_time.ndim != 1 or not len(imu_time):
+        raise ValueError("IMU timestamps must be a nonempty vector.")
+    if float(imu_time[0]) > start or float(imu_time[-1]) < end:
+        raise ValueError("Flight must cover the complete cutoff+5 to cutoff+25 interval.")
+    return (imu_time >= start) & (imu_time <= end)
+
+
+class AirIMUESKF(nn.Module):
+    """Train existing CodeNet uncertainty heads; bypass corrected-IMU forward.
+
+    Freezes the existing backbone and correction heads using CodeNet's Stage 2
+    policy. Covariance heads retain loaded weights. All filter equations and
+    measurement covariances are fixed. Each call replays one full flight from
+    initialization, retaining the graph through all aided updates and cutoff.
+    """
+
+    def __init__(self, network, ekf=None):
+        super().__init__()
+        if not network.conf.propcov:
+            raise ValueError("AirIMU must have propcov=True for ESKF training.")
+        uncertainty_names = ("acccov_decoder", "gyrocov_decoder", "acc_bias_gain", "gyro_bias_gain")
+        frozen_names = ("cnn", "gru1", "gru2", "accdecoder", "gyrodecoder")
+        if not all(hasattr(network, name) for name in uncertainty_names + frozen_names):
+            raise TypeError("ESKF training requires CodeNet's encoder and uncertainty heads.")
+        # Keep this policy local: the committed CodeNet may predate the Stage 2
+        # helper available in a separate, uncommitted finetuning experiment.
+        network.requires_grad_(False)
+        for name in uncertainty_names:
+            getattr(network, name).requires_grad_(True)
+        self._frozen_modules = tuple(getattr(network, name) for name in frozen_names)
+        for module in self._frozen_modules:
+            module.eval()
+        self.network = network
+        self.ekf = DifferentiableESKF() if ekf is None else ekf
+        if any(parameter.requires_grad for parameter in self.ekf.parameters()):
+            raise ValueError("The ESKF must contain no trainable parameters.")
+
+    def train(self, mode=True):
+        super().train(mode)
+        if mode:
+            for module in self._frozen_modules:
+                module.eval()
+        return self
+
+    def predict_variance(self, raw_acceleration, raw_gyroscope):
+        if (raw_acceleration.ndim != 2 or raw_acceleration.shape[-1] != 3
+                or raw_gyroscope.shape != raw_acceleration.shape
+                or not len(raw_acceleration)):
+            raise ValueError("Raw IMU must have matching nonempty [N,3] arrays.")
+        reference = next(self.network.parameters())
+        acc = raw_acceleration.to(device=reference.device, dtype=reference.dtype)
+        gyro = raw_gyroscope.to(device=reference.device, dtype=reference.dtype)
+        # Supply nine frames of leading context without altering real samples.
+        # Repeating raw samples avoids requiring GT attitude for CNN padding.
+        context = self.network.interval
+        data = {
+            "acc": torch.cat((acc[:1].expand(context, -1), acc), dim=0)[None],
+            "gyro": torch.cat((gyro[:1].expand(context, -1), gyro), dim=0)[None],
+        }
+        output = self.network.inference(data)["cov_state"]
+        if output["acc_cov"] is None or output["gyro_cov"] is None:
+            raise ValueError("The network did not return IMU covariance predictions.")
+        variance = torch.cat((output["acc_cov"][0], output["gyro_cov"][0]), dim=-1)
+        if variance.shape != (len(acc), 6):
+            raise ValueError("AirIMU covariance output is not aligned with raw IMU timestamps.")
+        # .to preserves the gradient from the Float64 EKF to a Float32 network.
+        return variance.to(device=self.ekf.gravity.device, dtype=torch.float64)
+
+    def forward(self, raw_acceleration, raw_gyroscope, imu_time, vicon_events,
+                cutoff_timestamp, initial_state, initial_covariance, vicon_velocity_gt):
+        variance = self.predict_variance(raw_acceleration, raw_gyroscope)
+        result = self.ekf.run_sequence(
+            {"acc": raw_acceleration, "gyro": raw_gyroscope}, imu_time, variance,
+            vicon_events, cutoff_timestamp, initial_state, initial_covariance)
+        times = torch.as_tensor(imu_time, dtype=torch.float64, device=variance.device)
+        mask = velocity_evaluation_mask(times, cutoff_timestamp)
+        gt = torch.as_tensor(vicon_velocity_gt, dtype=torch.float64, device=variance.device)
+        loss = horizontal_velocity_loss(result["velocity"], gt, mask)
+        return {"loss": loss, "trajectory": result, "imu_variance": variance,
+                "evaluation_mask": mask}

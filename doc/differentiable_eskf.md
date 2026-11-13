@@ -1,0 +1,218 @@
+# Differentiable ESKF for covariance-only AirIMU training
+
+`ekf.DifferentiableESKF` implements the fixed Float64 15-dimensional error-state
+filter. `ekf.AirIMUESKF` connects the existing CodeNet covariance heads to a
+complete flight replay. The existing `train.py`, `train_motion_finetune.py`,
+dataset transformations, and correction-based training paths are unchanged.
+
+## Filter and frame conventions
+
+- Nominal state: position, velocity, Hamilton **wxyz** quaternion, accelerometer
+  bias, gyroscope bias. The quaternion rotates **body to navigation**.
+- Error indexing: position `0:3`, velocity `3:6`, right attitude error `6:9`,
+  accelerometer bias `9:12`, gyroscope bias `12:15`.
+- Right attitude error: `R_true = R_nominal Exp(delta_theta)`; injection is
+  `q_new = q_old * Exp(delta_theta)`. The covariance reset uses the SO(3) right
+  Jacobian of the injected correction, including its dependence on that correction.
+- Default navigation is z-up, with gravity `[0, 0, -9.80665]` m/s². Pass a gravity
+  vector for another navigation convention or measured gravity magnitude.
+- Inputs are the original body-frame specific force (m/s²) and angular rate
+  (rad/s). Do not subtract gravity, apply learned corrections, or subtract a fixed
+  bias from these arrays. The EKF subtracts its evolving bias estimates internally.
+- All IMU, pose, velocity, and bias inputs must already use matching body and
+  navigation conventions. No automatic frame conversion is performed. PyPose
+  quaternion arrays elsewhere in the repository use **xyzw** and must be reordered.
+
+The discrete transition is the first derivative of the implemented nominal
+integration. In particular, acceleration uses the **prior** attitude, and both
+position and velocity contain attitude and accelerometer-bias sensitivity.
+Attitude propagation uses `Exp(-omega_corrected * dt)` in its error transition
+and `-J_right(omega_corrected * dt) * dt` for gyro-bias sensitivity.
+
+AirIMU supplies six **sample variances**, ordered `[acc_x, acc_y, acc_z, gyro_x,
+gyro_y, gyro_z]`. They are neither standard deviations nor continuous noise
+densities. IMU increment covariance scales as `variance * dt²`; fixed bias random
+walk covariance scales as `density² * dt`. The noise map also accounts for the
+position contribution from acceleration integration. Each segment between IMU
+boundaries and Vicon timestamps uses its own integration interval and the held
+sample's variance. This segment noise model is shared by training and evaluation;
+it does not maintain correlations of sample noise across split segments.
+
+The filter has **no parameters**. Fixed priors are 0.10 m position, 0.20 m/s
+velocity, 5° attitude, 0.10 m/s² accelerometer bias, and 0.020 rad/s gyro bias
+(standard deviations). Bias random-walk densities are 0.002 m/s²/√s and
+0.0002 rad/s/√s. Fixed Vicon standard deviations are 0.01 m, 0.05 m/s, and 2°.
+Innovation solves use Cholesky with `1e-9` jitter; updates use Joseph form.
+
+## Vicon aiding and cutoff
+
+The default enabled channels match the supplied flight configuration:
+**horizontal position, horizontal velocity, and yaw**. Position z is ignored;
+height fusion is disabled. Yaw accepts a scalar angle or quaternion and uses a
+wrapped residual and a Jacobian in right attitude-error coordinates.
+
+The runner consumes chronological `ViconEvent(timestamp, observation_type,
+observation)` entries, with one event per enabled channel per original observation.
+It splits IMU propagation at events inside an IMU interval. Each event is fused
+once at its timestamp, using nominal propagation and Jacobians from the same
+prior state. Duplicate channel/timestamp pairs and out-of-order events are rejected.
+
+Only events with `timestamp < cutoff_timestamp` are fused. At cutoff there is no
+state initialization, covariance replacement, or graph truncation. The output
+contains one row per IMU timestamp, including the initial state:
+
+```python
+{
+    "position": ...,             # [N, 3]
+    "velocity": ...,             # [N, 3]
+    "quaternion": ...,           # [N, 4], wxyz
+    "accelerometer_bias": ...,   # [N, 3]
+    "gyroscope_bias": ...,       # [N, 3]
+    "covariance": ...,           # [N, 15, 15]
+}
+```
+
+The loss is the mean of the squared horizontal vector error (sum x/y, then mean
+over timestamps) on the inclusive interval `[cutoff+5, cutoff+25]`. Ground truth
+must cover that interval. Covariance predictions **before** cutoff can affect
+post-cutoff velocity through aided corrections to velocity, attitude, and bias.
+Covariance predictions **at or after** cutoff change covariance only: their
+gradient from the primary velocity loss is exactly zero. Shared AirIMU weights
+are trained through their pre-cutoff outputs.
+
+## Cutoff table and flight files
+
+Copy [the cutoff template](../configs/ekf/cutoffs.csv.example) and supply a row per
+flight. For example, this is the schema (replace `TIMESTAMP_SECONDS` with the
+actual cutoff, using the original IMU/Vicon timestamp reference):
+
+```csv
+dataset,data_name,cutoff_timestamp
+T-Lab_10th_September_dataset,High-Dynamic/AI/flight_1,TIMESTAMP_SECONDS
+```
+
+The key `dataset/data_name` must equal the manifest `id`. This uses the same
+dataset/category/group/flight identity as the initial sensor bias workflow.
+The table does not invent cutoff values or convert elapsed seconds to epoch time.
+
+Copy [the flight manifest](../configs/ekf/flights.example.json), select disjoint
+`train`, `validation`, and `test` flights, and set the file paths. Paths are relative
+to the manifest. Each flight requires:
+
+| Input | CSV columns |
+| --- | --- |
+| `imu_csv` | `time,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z` |
+| `vicon_csv` | `time,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,quat_w,quat_x,quat_y,quat_z` |
+| `ground_truth_csv` | `time,vel_x,vel_y,vel_z` (additional columns are allowed) |
+| `px4_velocity_csv` | `time,vel_x,vel_y,vel_z` |
+
+All timestamps are seconds in the **same reference**. Export Vicon measurements
+once at their original measurement timestamps. The aligned TLab `data.csv` can be
+used as `ground_truth_csv`; repeated/resampled GT rows must not be presented as
+new aiding observations. Identical values alone cannot distinguish a stationary
+measurement from a repeated observation, so the original event timestamps are needed.
+
+The loader initializes position and attitude from pre-cutoff Vicon and velocity
+from recorded **PX4** velocity at the first selected IMU timestamp. It uses linear
+interpolation for fixed recorded position/velocity and shortest-arc SLERP for the
+initial attitude, with no extrapolation. Optional manifest `start_timestamp`
+selects the aided trajectory's beginning (first IMU sample at or after that time).
+Bias means default to zero; optional `initial_accel_bias` and `initial_gyro_bias`
+are three-element arrays in the IMU body frame. No bias is pre-subtracted from IMU.
+
+Flights must cover the complete evaluation interval and contain aiding after
+initialization. The loader ends replay at exactly `cutoff+25`, inserting a terminal
+output timestamp inside the last held IMU interval if necessary. Vicon after
+cutoff is used only as GT. The PX4 recording needs initial-time coverage for
+training and evaluation-interval coverage for a complete PX4 comparison report.
+
+## Run training and evaluation
+
+Use the existing PyTorch environment with the repository requirements installed:
+
+```bash
+python train_eskf.py \
+  --config configs/exp/TLab/finetune_motion_body_stage2.conf \
+  --ckpt path/to/matching_airimu_checkpoint.ckpt \
+  --flights configs/ekf/flights.json --cutoffs configs/ekf/cutoffs.csv \
+  --output experiments/eskf_run --device cuda:0 --epochs 10
+```
+
+`AirIMUESKF` calls `network.inference()` for covariance only. It freezes the
+backbone and correction heads using a local covariance-only policy, retains loaded
+covariance-head weights, and passes untouched raw IMU into the ESKF. Nine repeated
+leading raw samples provide CNN context without requiring GT attitude. The
+network runs in Float32 and the differentiable conversion to Float64 preserves
+gradients into its uncertainty heads. Each flight is replayed from initialization
+with a complete graph; one optimizer step is taken per flight. Validation runs in
+evaluation mode, and the best checkpoint is selected by validation horizontal MSE.
+Long aided prefixes consume more memory because their graph is retained.
+
+Outputs include `best_model.ckpt`, `newest.ckpt`, `metrics.jsonl`, and
+`eskf_metadata.json`, with cutoff/channel/frame settings recorded for review.
+The checkpoint's `model_state_dict` can be loaded by the existing AirIMU tools.
+
+Evaluate learned covariance or a fixed-noise baseline:
+
+```bash
+python -m evaluation.evaluate_eskf \
+  --config configs/exp/TLab/finetune_motion_body_stage2.conf \
+  --ckpt experiments/eskf_run/best_model.ckpt \
+  --flights configs/ekf/flights.json --cutoffs configs/ekf/cutoffs.csv \
+  --output experiments/eskf_run/evaluation --split test
+
+python -m evaluation.evaluate_eskf \
+  --accel-variance 0.001 --gyro-variance 0.001 \
+  --flights configs/ekf/flights.json --cutoffs configs/ekf/cutoffs.csv \
+  --output experiments/eskf_fixed/evaluation --split test
+```
+
+Both commands accept `--gravity GX GY GZ`. Set it to the selected flight navigation
+convention and gravity magnitude, with matching recorded poses and velocities.
+Fixed baseline variances are configurable per-sample values; they are not inferred
+from the real PX4 process-noise parameters.
+
+Evaluation saves full state/bias/covariance trajectories and reports horizontal
+EKF–Vicon, PX4–Vicon, and EKF–PX4 errors on the same interval when PX4 data covers
+it. This is a prototype ESKF mechanism comparison; it does not duplicate all PX4
+EKF2 timing, gating, calibration, or discretization behavior. Actual-flight
+agreement must be assessed after supplying cutoffs and the recorded source data.
+
+## Python interface and acceptance checks
+
+```python
+import torch
+from ekf import DifferentiableESKF, run_ekf_sequence, horizontal_velocity_loss
+
+ekf = DifferentiableESKF().to(device)
+state, P = ekf.initialize(vicon_initial_position, px4_initial_velocity,
+                          vicon_initial_quaternion_wxyz)
+imu_variance = torch.full((len(imu_time), 6), .001,
+                          dtype=torch.float64, device=device, requires_grad=True)
+result = run_ekf_sequence(imu, imu_time, imu_variance, vicon_events,
+                          cutoff, state, P, ekf=ekf)
+mask = (imu_time >= cutoff + 5) & (imu_time <= cutoff + 25)
+loss = horizontal_velocity_loss(result["velocity"], vicon_velocity_gt, mask)
+loss.backward()
+assert imu_variance.grad is not None
+assert torch.isfinite(imu_variance.grad).all()
+print(imu_variance.grad[imu_time < cutoff].norm())
+print(imu_variance.grad[imu_time >= cutoff].norm())  # exactly zero
+```
+
+`imu` is `[N,6]` ordered acceleration then gyro, or `{"acc": acc, "gyro": gyro}`.
+The function returns the dictionary above, rather than the incomplete tuple
+example in the original requirements. Variance may have N rows or N−1 rows; the
+last IMU sample has no propagation interval.
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The suite covers initialization, gravity, quaternion and bias propagation,
+covariance symmetry/PSD and units, finite-difference transition/reset/yaw
+Jacobians, event splitting and cutoff continuity, autograd/finite-difference
+agreement, pre/post-cutoff sensitivity, real CodeNet covariance-head gradients,
+frozen weights/buffers, input interpolation, and cutoff-table matching.
+It includes a full 200 Hz replay through cutoff+25 seconds with backpropagation.
+Recorded-flight PX4 acceptance requires the real cutoff table and recordings.

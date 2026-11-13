@@ -150,6 +150,11 @@ optional arguments:
   --mask           mask the segments if needed. 
 ```
 
+For covariance-only AirIMU training through a differentiable 15-state EKF with
+Vicon cutoff, see [the ESKF integration guide](doc/differentiable_eskf.md).
+The new entry points are `train_eskf.py` and
+`python -m evaluation.evaluate_eskf`; existing training commands are unchanged.
+
 ### Cite Our Work
 
 Thanks for using our work. You can cite it as:

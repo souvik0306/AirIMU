@@ -1,0 +1,26 @@
+[
+  {
+    "id": "T-Lab_10th_September_dataset/High-Dynamic/AI/flight_1",
+    "split": "train",
+    "imu_csv": "../../T-Lab_10th_September_dataset/High-Dynamic/AI/flight_1/imu.csv",
+    "vicon_csv": "../../path/to/original_vicon_events.csv",
+    "ground_truth_csv": "../../T-Lab_10th_September_dataset/High-Dynamic/AI/flight_1/data.csv",
+    "px4_velocity_csv": "../../path/to/recorded_px4_velocity.csv"
+  },
+  {
+    "id": "T-Lab_10th_September_dataset/High-Dynamic/AI/flight_2",
+    "split": "validation",
+    "imu_csv": "../../T-Lab_10th_September_dataset/High-Dynamic/AI/flight_2/imu.csv",
+    "vicon_csv": "../../path/to/flight_2_original_vicon_events.csv",
+    "ground_truth_csv": "../../T-Lab_10th_September_dataset/High-Dynamic/AI/flight_2/data.csv",
+    "px4_velocity_csv": "../../path/to/flight_2_recorded_px4_velocity.csv"
+  },
+  {
+    "id": "T-Lab_10th_September_dataset/High-Dynamic/AI/flight_3",
+    "split": "test",
+    "imu_csv": "../../T-Lab_10th_September_dataset/High-Dynamic/AI/flight_3/imu.csv",
+    "vicon_csv": "../../path/to/flight_3_original_vicon_events.csv",
+    "ground_truth_csv": "../../T-Lab_10th_September_dataset/High-Dynamic/AI/flight_3/data.csv",
+    "px4_velocity_csv": "../../path/to/flight_3_recorded_px4_velocity.csv"
+  }
+]
