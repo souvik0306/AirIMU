@@ -1,0 +1,100 @@
+#PBS -S /bin/bash
+#PBS -q auto_free
+#PBS -j oe
+#PBS -N airimu_joint_ekf
+#PBS -l walltime=24:00:00
+#PBS -l select=1:ncpus=36:mem=250gb:ngpus=1
+
+# Submit with:
+#   qsub airimu_joint_ekf.pbs
+# Override inputs or runtime settings with:
+#   qsub -v EKF_FLIGHTS=/absolute/path/flights.json,EKF_EPOCHS=10 airimu_joint_ekf.pbs
+
+set -euo pipefail
+
+cd "$PBS_O_WORKDIR"
+module load apptainer/1.4.1
+
+image=/app1/common/singularity-img/vanda/pytorch_2.5_cuda_12.4_unsloth.sif
+config=${EKF_CONFIG:-configs/exp/TLab/4th_Nov_Scratch_stage2.conf}
+checkpoint=${AIRIMU_CKPT:-experiments/20261113_175405_SGT_job1551559_with_bias/scratch/stage2/ckpt/best_model.ckpt}
+flights=${EKF_FLIGHTS:-configs/ekf/flights.json}
+sensor_metadata_root=${SENSOR_METADATA_ROOT:-initial_sensor_biases}
+epochs=${EKF_EPOCHS:-10}
+learning_rate=${EKF_LR:-1e-5}
+cpu_threads=${EKF_CPU_THREADS:-8}
+run_fixed_baseline=${EKF_FIXED_BASELINE:-1}
+
+for required_file in "$config" "$checkpoint" "$flights"; do
+    if [[ ! -f "$required_file" ]]; then
+        echo "ERROR: required file not found: $required_file" >&2
+        if [[ "$required_file" == "$flights" ]]; then
+            echo "Create it from configs/ekf/flights.example.json with real Vicon-event and PX4-velocity CSV paths." >&2
+        fi
+        exit 2
+    fi
+done
+if [[ ! -d "$sensor_metadata_root" ]]; then
+    echo "ERROR: sensor metadata directory not found: $sensor_metadata_root" >&2
+    exit 2
+fi
+
+run_timestamp=$(TZ=Asia/Singapore date +%Y%m%d_%H%M%S_SGT)
+job_id=${PBS_JOBID%%.*}
+run_root=${EKF_RUN_ROOT:-experiments/${run_timestamp}_job${job_id}/joint_ekf}
+training_output="$run_root/training"
+learned_evaluation="$run_root/evaluation_learned"
+fixed_evaluation="$run_root/evaluation_fixed"
+
+echo "Joint differentiable ESKF training"
+echo "Run root: $run_root"
+echo "AirIMU checkpoint: $checkpoint"
+echo "Flight manifest: $flights"
+echo "Sensor metadata: $sensor_metadata_root"
+echo "Epochs: $epochs; learning rate: $learning_rate"
+echo "Working directory: $(pwd)"
+echo "Compute node: $(hostname)"
+nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
+
+apptainer exec --nv -e "$image" \
+python3 -u train_eskf.py \
+--config "$config" \
+--ckpt "$checkpoint" \
+--flights "$flights" \
+--sensor-metadata-root "$sensor_metadata_root" \
+--output "$training_output" \
+--device cuda:0 \
+--epochs "$epochs" \
+--lr "$learning_rate" \
+--cpu-threads "$cpu_threads"
+
+if [[ ! -f "$training_output/best_model.ckpt" ]]; then
+    echo "ERROR: ESKF training completed without best_model.ckpt" >&2
+    exit 3
+fi
+
+echo "Training finished. Evaluating learned covariance on the test split."
+apptainer exec --nv -e "$image" \
+python3 -u -m evaluation.evaluate_eskf \
+--config "$config" \
+--ckpt "$training_output/best_model.ckpt" \
+--flights "$flights" \
+--sensor-metadata-root "$sensor_metadata_root" \
+--output "$learned_evaluation" \
+--split test \
+--device cuda:0 \
+--cpu-threads "$cpu_threads"
+
+if [[ "$run_fixed_baseline" == "1" ]]; then
+    echo "Evaluating the fixed-noise EKF baseline on the same test split."
+    apptainer exec --nv -e "$image" \
+    python3 -u -m evaluation.evaluate_eskf \
+    --flights "$flights" \
+    --sensor-metadata-root "$sensor_metadata_root" \
+    --output "$fixed_evaluation" \
+    --split test \
+    --device cuda:0 \
+    --cpu-threads "$cpu_threads"
+fi
+
+echo "Joint ESKF training and evaluation finished: $run_root"
