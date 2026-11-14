@@ -9,10 +9,152 @@ import csv
 import json
 import math
 from pathlib import Path
+import re
 
 import torch
 
 from .eskf import ViconEvent, normalize_quaternion
+
+
+_DATASET_METADATA_DIRECTORIES = {
+    "T-Lab_31st_July_dataset": "2026-07-31",
+    "T-Lab_28th_July_dataset": "2026-07-28",
+}
+
+_SEPTEMBER_METADATA_DIRECTORIES = {
+    "High-Dynamic": "10th_Sept_High",
+    "Hover": "10th_Sept_AI_Hover_Rosbags",
+    "Low-Dynamic": "10th_Sept_Low-Dynamic",
+    "Medium-Dynamic": "10th_Sept_Medium",
+    "Super-High-Dynamic": "10th_Sept_Super-High",
+    "Yaw": "10th_Sept_AI_Yaw_Rosbags",
+}
+
+_BIAS_COLUMNS = (
+    "accel_bias_x_mps2", "accel_bias_y_mps2", "accel_bias_z_mps2",
+    "gyro_bias_x_radps", "gyro_bias_y_radps", "gyro_bias_z_radps",
+)
+
+
+def _sensor_metadata_location(flight_id):
+    """Map a stable dataset flight id to its exported metadata table row."""
+    parts = str(flight_id).replace("\\", "/").strip("/").split("/")
+    dataset = parts[0] if parts else ""
+    if dataset in _DATASET_METADATA_DIRECTORIES:
+        if len(parts) != 3:
+            raise ValueError(f"Expected DATASET/GROUP/flight_N, got {flight_id!r}.")
+        directory = _DATASET_METADATA_DIRECTORIES[dataset]
+        group, flight_name = parts[1:]
+    elif dataset == "T-Lab_10th_September_dataset":
+        if len(parts) != 4:
+            raise ValueError(
+                f"Expected DATASET/CATEGORY/GROUP/flight_N, got {flight_id!r}."
+            )
+        category, group, flight_name = parts[1:]
+        if category not in _SEPTEMBER_METADATA_DIRECTORIES:
+            raise KeyError(f"No sensor-metadata mapping for category {category!r}.")
+        directory = _SEPTEMBER_METADATA_DIRECTORIES[category]
+    else:
+        raise KeyError(f"No sensor-metadata mapping for dataset {dataset!r}.")
+
+    group = group.upper()
+    if group == "UN":
+        group = "AI"
+    if group not in ("AI", "RAW"):
+        raise KeyError(f"Unsupported sensor-metadata group {group!r}.")
+    match = re.fullmatch(r"flight_(\d+)", flight_name)
+    if match is None:
+        raise ValueError(f"Cannot determine flight number from {flight_id!r}.")
+    return directory, group, int(match.group(1))
+
+
+def read_sensor_metadata_table(path):
+    """Read the finalized bag/ULG, cutoff, sample-count, and bias schema."""
+    path = Path(path).resolve()
+    required = {
+        "bag_file", "ulg_file", "group", "flight_number",
+        "cutoff_rosbag_s", "cutoff_ros_epoch_s", "bias_samples",
+        *_BIAS_COLUMNS,
+    }
+    records = {}
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        missing = sorted(required.difference(reader.fieldnames or ()))
+        if missing:
+            raise ValueError(f"{path} is missing required columns: {missing}")
+        for line, row in enumerate(reader, 2):
+            try:
+                group = row["group"].strip().upper()
+                flight_number = int(row["flight_number"])
+                bias_samples = int(row["bias_samples"])
+                cutoff_rosbag_s = float(row["cutoff_rosbag_s"])
+                cutoff_ros_epoch_s = float(row["cutoff_ros_epoch_s"])
+                bias = tuple(float(row[column]) for column in _BIAS_COLUMNS)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"Invalid sensor metadata at {path}:{line}: {error}") from error
+            bag_file, ulg_file = row["bag_file"].strip(), row["ulg_file"].strip()
+            numeric = bias + (cutoff_rosbag_s, cutoff_ros_epoch_s)
+            key = (group, flight_number)
+            if (not bag_file or not ulg_file or group not in ("AI", "RAW") or
+                    flight_number < 1 or bias_samples < 1 or cutoff_rosbag_s < 0 or
+                    cutoff_ros_epoch_s <= 0 or not all(math.isfinite(x) for x in numeric) or
+                    key in records):
+                raise ValueError(f"Invalid or duplicate sensor metadata at {path}:{line}.")
+            records[key] = {
+                "bag_file": bag_file,
+                "ulg_file": ulg_file,
+                "group": group,
+                "flight_number": flight_number,
+                "bias_samples": bias_samples,
+                "cutoff_rosbag_s": cutoff_rosbag_s,
+                "cutoff_ros_epoch_s": cutoff_ros_epoch_s,
+                "initial_accel_bias": list(bias[:3]),
+                "initial_gyro_bias": list(bias[3:]),
+                "source_csv": str(path),
+            }
+    if not records:
+        raise ValueError(f"Sensor metadata table is empty: {path}")
+    return records
+
+
+def apply_sensor_metadata(flights, root):
+    """Attach fixed biases and exact epoch cutoffs to manifest flight records."""
+    root = Path(root).resolve()
+    tables = {}
+    enriched, cutoffs = [], {}
+    for original in flights:
+        record = dict(original)
+        directory, group, flight_number = _sensor_metadata_location(record["id"])
+        table_path = root / directory / f"initial_sensor_bias_{group}.csv"
+        if table_path not in tables:
+            tables[table_path] = read_sensor_metadata_table(table_path)
+        key = (group, flight_number)
+        if key not in tables[table_path]:
+            raise KeyError(f"No sensor metadata for {record['id']} in {table_path}.")
+        metadata = dict(tables[table_path][key])
+        record["initial_accel_bias"] = metadata["initial_accel_bias"]
+        record["initial_gyro_bias"] = metadata["initial_gyro_bias"]
+        record["sensor_metadata"] = metadata
+        cutoffs[record["id"]] = metadata["cutoff_ros_epoch_s"]
+        enriched.append(record)
+    return enriched, cutoffs
+
+
+def load_flight_metadata(flights, cutoff_table=None, sensor_metadata_root=None):
+    """Resolve cutoffs and optional initial biases from either supported source."""
+    if sensor_metadata_root:
+        flights, cutoffs = apply_sensor_metadata(flights, sensor_metadata_root)
+    else:
+        flights, cutoffs = list(flights), {}
+    if cutoff_table:
+        # An explicit legacy cutoff table remains supported and takes precedence.
+        cutoffs.update(read_cutoff_table(cutoff_table))
+    if not cutoff_table and not sensor_metadata_root:
+        raise ValueError("Provide a cutoff table or sensor metadata root.")
+    missing = [record["id"] for record in flights if record["id"] not in cutoffs]
+    if missing:
+        raise KeyError(f"No cutoff metadata for flights: {missing}")
+    return flights, cutoffs
 
 
 def read_cutoff_table(path):

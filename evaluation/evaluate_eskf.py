@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 
 from ekf import DifferentiableESKF, velocity_evaluation_mask
-from ekf.data import (interpolate, prepare_flight, read_cutoff_table,
+from ekf.data import (interpolate, load_flight_metadata, prepare_flight,
                       read_flight_manifest, read_numeric_csv)
 from ekf.experiment import load_airimu, xy_metrics
 
@@ -19,7 +19,11 @@ from ekf.experiment import load_airimu, xy_metrics
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--flights", required=True)
-    parser.add_argument("--cutoffs", required=True)
+    parser.add_argument("--cutoffs", help="Legacy absolute-cutoff CSV")
+    parser.add_argument(
+        "--sensor-metadata-root",
+        help="Root containing the finalized initial_sensor_bias_*.csv tables",
+    )
     parser.add_argument("--output", required=True)
     parser.add_argument("--split", choices=("train", "validation", "test"), default="test")
     parser.add_argument("--config", help="Required with --ckpt for learned covariance")
@@ -36,10 +40,14 @@ def main():
                                   for x in (args.accel_variance, args.gyro_variance)):
         parser.error("Use positive cpu-threads and finite nonnegative variances.")
     torch.set_num_threads(args.cpu_threads)
+    if not args.cutoffs and not args.sensor_metadata_root:
+        parser.error("Pass --sensor-metadata-root, --cutoffs, or both.")
     flights = [record for record in read_flight_manifest(args.flights) if record["split"] == args.split]
     if not flights:
         parser.error(f"No flights in split={args.split}.")
-    cutoffs = read_cutoff_table(args.cutoffs)
+    flights, cutoffs = load_flight_metadata(
+        flights, args.cutoffs, args.sensor_metadata_root
+    )
     ekf = DifferentiableESKF(gravity=args.gravity).to(args.device)
     wrapper = load_airimu(args.config, args.ckpt, ekf, args.device) if args.ckpt else None
     if wrapper:

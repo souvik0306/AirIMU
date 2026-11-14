@@ -80,7 +80,24 @@ Covariance predictions **at or after** cutoff change covariance only: their
 gradient from the primary velocity loss is exactly zero. Shared AirIMU weights
 are trained through their pre-cutoff outputs.
 
-## Cutoff table and flight files
+## Sensor metadata and flight files
+
+The preferred input is the finalized `initial_sensor_biases` directory. Each
+`initial_sensor_bias_*.csv` table must contain:
+
+```text
+bag_file,ulg_file,group,flight_number,cutoff_rosbag_s,cutoff_ros_epoch_s,
+bias_samples,accel_bias_x_mps2,accel_bias_y_mps2,accel_bias_z_mps2,
+gyro_bias_x_radps,gyro_bias_y_radps,gyro_bias_z_radps
+```
+
+The loader matches `group` and `flight_number` to the manifest id, maps the July
+dataset's `UN` group to `AI`, initializes the EKF bias state from the six bias
+columns, and uses `cutoff_ros_epoch_s` directly in the IMU timestamp reference.
+`cutoff_rosbag_s` is retained as provenance and is never guessed or rebased.
+
+The legacy standalone cutoff table remains supported. It can be used by itself,
+or passed together with sensor metadata to override only the cutoff timestamps.
 
 Copy [the cutoff template](../configs/ekf/cutoffs.csv.example) and supply a row per
 flight. For example, this is the schema (replace `TIMESTAMP_SECONDS` with the
@@ -134,7 +151,8 @@ Use the existing PyTorch environment with the repository requirements installed:
 python train_eskf.py \
   --config configs/exp/TLab/finetune_motion_body_stage2.conf \
   --ckpt path/to/matching_airimu_checkpoint.ckpt \
-  --flights configs/ekf/flights.json --cutoffs configs/ekf/cutoffs.csv \
+  --flights configs/ekf/flights.json \
+  --sensor-metadata-root initial_sensor_biases \
   --output experiments/eskf_run --device cuda:0 --epochs 10
 ```
 
@@ -158,12 +176,14 @@ Evaluate learned covariance or a fixed-noise baseline:
 python -m evaluation.evaluate_eskf \
   --config configs/exp/TLab/finetune_motion_body_stage2.conf \
   --ckpt experiments/eskf_run/best_model.ckpt \
-  --flights configs/ekf/flights.json --cutoffs configs/ekf/cutoffs.csv \
+  --flights configs/ekf/flights.json \
+  --sensor-metadata-root initial_sensor_biases \
   --output experiments/eskf_run/evaluation --split test
 
 python -m evaluation.evaluate_eskf \
   --accel-variance 0.001 --gyro-variance 0.001 \
-  --flights configs/ekf/flights.json --cutoffs configs/ekf/cutoffs.csv \
+  --flights configs/ekf/flights.json \
+  --sensor-metadata-root initial_sensor_biases \
   --output experiments/eskf_fixed/evaluation --split test
 ```
 

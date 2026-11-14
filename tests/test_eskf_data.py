@@ -9,8 +9,9 @@ import unittest
 import torch
 
 from ekf import DifferentiableESKF
-from ekf.data import (interpolate, prepare_flight, read_cutoff_table,
-                      read_flight_manifest, read_numeric_csv)
+from ekf.data import (interpolate, load_flight_metadata, prepare_flight,
+                      read_cutoff_table, read_flight_manifest, read_numeric_csv,
+                      read_sensor_metadata_table)
 
 
 def write_csv(path, header, rows):
@@ -35,6 +36,41 @@ class FlightDataTests(unittest.TestCase):
         write_csv(path, header, [("collection", "AI/flight_1", 1.), ("collection", "AI/flight_1", 2.)])
         with self.assertRaises(ValueError):
             read_cutoff_table(path)
+
+    def test_finalized_sensor_metadata_supplies_biases_and_epoch_cutoff(self):
+        metadata_root = self.root / "metadata"
+        table = metadata_root / "2026-07-31" / "initial_sensor_bias_AI.csv"
+        table.parent.mkdir(parents=True)
+        header = (
+            "bag_file,ulg_file,group,flight_number,cutoff_rosbag_s,"
+            "cutoff_ros_epoch_s,bias_samples,accel_bias_x_mps2,"
+            "accel_bias_y_mps2,accel_bias_z_mps2,gyro_bias_x_radps,"
+            "gyro_bias_y_radps,gyro_bias_z_radps"
+        )
+        write_csv(table, header, [
+            ("flight_1.bag", "log_1.ulg", "AI", 1, 2.2, 1002.2, 200,
+             .1, .2, .3, .01, .02, .03)
+        ])
+        parsed = read_sensor_metadata_table(table)
+        self.assertEqual(parsed[("AI", 1)]["bag_file"], "flight_1.bag")
+        record = self.make_record()
+        record["id"] = "T-Lab_31st_July_dataset/UN/flight_1"
+        flights, cutoffs = load_flight_metadata([record], sensor_metadata_root=metadata_root)
+        self.assertEqual(cutoffs[record["id"]], 1002.2)
+        self.assertEqual(flights[0]["initial_accel_bias"], [.1, .2, .3])
+        self.assertEqual(flights[0]["initial_gyro_bias"], [.01, .02, .03])
+        self.assertEqual(flights[0]["sensor_metadata"]["bias_samples"], 200)
+
+        # The legacy table can still override the cutoff while retaining biases.
+        cutoffs_csv = self.root / "cutoffs_override.csv"
+        write_csv(cutoffs_csv, "dataset,data_name,cutoff_timestamp", [
+            ("T-Lab_31st_July_dataset", "UN/flight_1", 1003.0)
+        ])
+        flights, cutoffs = load_flight_metadata(
+            [record], cutoffs_csv, metadata_root
+        )
+        self.assertEqual(cutoffs[record["id"]], 1003.0)
+        self.assertEqual(flights[0]["initial_accel_bias"], [.1, .2, .3])
 
     def test_interpolation_refuses_extrapolation_and_arrival_duplicates(self):
         time = torch.tensor([0., 1., 2.], dtype=torch.float64)
