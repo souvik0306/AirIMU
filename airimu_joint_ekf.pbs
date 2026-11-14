@@ -17,15 +17,20 @@ module load apptainer/1.4.1
 
 image=/app1/common/singularity-img/vanda/pytorch_2.5_cuda_12.4_unsloth.sif
 config=${EKF_CONFIG:-configs/exp/TLab/4th_Nov_Scratch_stage2.conf}
-checkpoint=${AIRIMU_CKPT:-experiments/20261113_175405_SGT_job1551559_with_bias/scratch/stage2/ckpt/best_model.ckpt}
+checkpoint=${AIRIMU_CKPT:-}
+checkpoint_args=()
+if [[ -n "$checkpoint" ]]; then
+    [[ -f "$checkpoint" ]] || { echo "ERROR: checkpoint not found: $checkpoint" >&2; exit 2; }
+    checkpoint_args=(--ckpt "$checkpoint")
+fi
 flights=${EKF_FLIGHTS:-configs/ekf/flights.json}
 sensor_metadata_root=${SENSOR_METADATA_ROOT:-initial_sensor_biases}
-epochs=${EKF_EPOCHS:-10}
-learning_rate=${EKF_LR:-1e-5}
+epochs=${EKF_EPOCHS:-30}
+learning_rate=${EKF_LR:-1e-4}
 cpu_threads=${EKF_CPU_THREADS:-8}
 run_fixed_baseline=${EKF_FIXED_BASELINE:-1}
 
-for required_file in "$config" "$checkpoint" "$flights"; do
+for required_file in "$config" "$flights"; do
     if [[ ! -f "$required_file" ]]; then
         echo "ERROR: required file not found: $required_file" >&2
         if [[ "$required_file" == "$flights" ]]; then
@@ -48,7 +53,7 @@ fixed_evaluation="$run_root/evaluation_fixed"
 
 echo "Joint differentiable ESKF training"
 echo "Run root: $run_root"
-echo "AirIMU checkpoint: $checkpoint"
+echo "Initialization: ${checkpoint:-scratch (encoder and covariance heads)}"
 echo "Flight manifest: $flights"
 echo "Sensor metadata: $sensor_metadata_root"
 echo "Epochs: $epochs; learning rate: $learning_rate"
@@ -59,7 +64,7 @@ nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
 apptainer exec --nv -e "$image" \
 python3 -u train_eskf.py \
 --config "$config" \
---ckpt "$checkpoint" \
+"${checkpoint_args[@]}" \
 --flights "$flights" \
 --sensor-metadata-root "$sensor_metadata_root" \
 --output "$training_output" \
