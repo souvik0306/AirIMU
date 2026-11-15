@@ -8,7 +8,7 @@
 # Submit with:
 #   qsub airimu_joint_ekf.pbs
 # Override inputs or runtime settings with:
-#   qsub -v EKF_FLIGHTS=/absolute/path/flights.json,EKF_EPOCHS=30 airimu_joint_ekf.pbs
+#   qsub -v EKF_DATASET_CONFIG=/absolute/path/tlab_body.conf,EKF_EPOCHS=30 airimu_joint_ekf.pbs
 # AIRIMU_MAX_EPOCHES is optional; when unset, Stage 1 and Stage 2 use their
 # full configured epoch counts. It is intended only for short flow checks.
 
@@ -20,7 +20,7 @@ module load apptainer/1.4.1
 image=/app1/common/singularity-img/vanda/pytorch_2.5_cuda_12.4_unsloth.sif
 stage1_config=${STAGE1_CONFIG:-configs/exp/TLab/4th_Nov_Scratch.conf}
 stage2_config=${STAGE2_CONFIG:-configs/exp/TLab/4th_Nov_Scratch_stage2.conf}
-flights=${EKF_FLIGHTS:-configs/ekf/flights.json}
+dataset_config=${EKF_DATASET_CONFIG:-configs/datasets/TLab/tlab_body.conf}
 sensor_metadata_root=${SENSOR_METADATA_ROOT:-initial_sensor_biases}
 ekf_epochs=${EKF_EPOCHS:-30}
 ekf_learning_rate=${EKF_LR:-1e-5}
@@ -32,12 +32,9 @@ if [[ -n "${AIRIMU_MAX_EPOCHES:-}" ]]; then
     airimu_epoch_args=(--max_epoches "$AIRIMU_MAX_EPOCHES")
 fi
 
-for required_file in "$stage1_config" "$stage2_config" "$flights"; do
+for required_file in "$stage1_config" "$stage2_config" "$dataset_config"; do
     if [[ ! -f "$required_file" ]]; then
         echo "ERROR: required file not found: $required_file" >&2
-        if [[ "$required_file" == "$flights" ]]; then
-            echo "Create it from configs/ekf/flights.example.json with real Vicon-event and PX4-velocity CSV paths." >&2
-        fi
         exit 2
     fi
 done
@@ -57,7 +54,7 @@ fixed_evaluation="$run_root/evaluation_fixed"
 
 echo "Full scratch AirIMU and joint differentiable ESKF training"
 echo "Run root: $run_root"
-echo "Flight manifest: $flights"
+echo "Dataset config: $dataset_config"
 echo "Sensor metadata: $sensor_metadata_root"
 echo "ESKF epochs: $ekf_epochs; ESKF learning rate: $ekf_learning_rate"
 echo "Working directory: $(pwd)"
@@ -100,7 +97,7 @@ apptainer exec --nv -e "$image" \
 python3 -u train_eskf.py \
 --config "$stage2_config" \
 --ckpt "$stage2_checkpoint" \
---flights "$flights" \
+--dataset-config "$dataset_config" \
 --sensor-metadata-root "$sensor_metadata_root" \
 --output "$ekf_training_output" \
 --device cuda:0 \
@@ -118,7 +115,7 @@ apptainer exec --nv -e "$image" \
 python3 -u -m evaluation.evaluate_eskf \
 --config "$stage2_config" \
 --ckpt "$ekf_training_output/best_model.ckpt" \
---flights "$flights" \
+--dataset-config "$dataset_config" \
 --sensor-metadata-root "$sensor_metadata_root" \
 --output "$learned_evaluation" \
 --split test \
@@ -129,7 +126,7 @@ if [[ "$run_fixed_baseline" == "1" ]]; then
     echo "Evaluating the fixed-noise EKF baseline on the same test split."
     apptainer exec --nv -e "$image" \
     python3 -u -m evaluation.evaluate_eskf \
-    --flights "$flights" \
+    --dataset-config "$dataset_config" \
     --sensor-metadata-root "$sensor_metadata_root" \
     --output "$fixed_evaluation" \
     --split test \

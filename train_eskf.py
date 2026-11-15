@@ -9,7 +9,7 @@ import random
 import torch
 
 from ekf import DifferentiableESKF
-from ekf.data import load_flight_metadata, prepare_flight, read_flight_manifest
+from ekf.data import load_flight_metadata, prepare_flight, read_dataset_flights
 from ekf.experiment import load_airimu, save_checkpoint
 
 
@@ -17,10 +17,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="Existing AirIMU network HOCON config")
     parser.add_argument("--ckpt", required=True, help="AirIMU checkpoint (covariance heads are retained)")
-    parser.add_argument("--flights", required=True, help="JSON manifest with train/validation flights")
-    parser.add_argument("--cutoffs", help="Legacy CSV table of original-reference cutoff seconds")
+    parser.add_argument("--dataset-config", required=True, help="TLab HOCON dataset split config")
     parser.add_argument(
-        "--sensor-metadata-root",
+        "--sensor-metadata-root", required=True,
         help="Root containing the finalized initial_sensor_bias_*.csv tables",
     )
     parser.add_argument("--output", required=True, help="Experiment directory for ESKF checkpoints")
@@ -36,15 +35,13 @@ def main():
     torch.set_num_threads(args.cpu_threads)
     torch.manual_seed(args.seed)
     rng = random.Random(args.seed)
-    if not args.cutoffs and not args.sensor_metadata_root:
-        parser.error("Pass --sensor-metadata-root, --cutoffs, or both.")
     flights, cutoffs = load_flight_metadata(
-        read_flight_manifest(args.flights), args.cutoffs, args.sensor_metadata_root
+        read_dataset_flights(args.dataset_config), args.sensor_metadata_root
     )
     training = [record for record in flights if record["split"] == "train"]
     validation = [record for record in flights if record["split"] == "validation"]
     if not training or not validation:
-        parser.error("Provide disjoint train and validation flights in the manifest.")
+        parser.error("Dataset config must provide disjoint train and test flights.")
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
     ekf = DifferentiableESKF(gravity=args.gravity).to(args.device)

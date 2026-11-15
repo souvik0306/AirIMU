@@ -1,16 +1,16 @@
-"""Offline flight preparation. Original Vicon events and GT stay separate.
+"""Offline flight preparation from the standard TLab dataset layout.
 
 CSV schemas use SI units, seconds in a shared reference, and Hamilton wxyz
 body-to-navigation quaternions. No automatic frame or timestamp conversion is
-performed. The aligned TLab loader is intentionally bypassed for EKF replay.
+performed.
 """
 
 import csv
-import json
 import math
 from pathlib import Path
 import re
 
+from pyhocon import ConfigFactory
 import torch
 
 from .eskf import ViconEvent, normalize_quaternion
@@ -118,7 +118,7 @@ def read_sensor_metadata_table(path):
 
 
 def apply_sensor_metadata(flights, root):
-    """Attach fixed biases and exact epoch cutoffs to manifest flight records."""
+    """Attach fixed biases and exact epoch cutoffs to dataset flight records."""
     root = Path(root).resolve()
     tables = {}
     enriched, cutoffs = [], {}
@@ -140,62 +140,48 @@ def apply_sensor_metadata(flights, root):
     return enriched, cutoffs
 
 
-def load_flight_metadata(flights, cutoff_table=None, sensor_metadata_root=None):
-    """Resolve cutoffs and optional initial biases from either supported source."""
-    if sensor_metadata_root:
-        flights, cutoffs = apply_sensor_metadata(flights, sensor_metadata_root)
-    else:
-        flights, cutoffs = list(flights), {}
-    if cutoff_table:
-        # An explicit legacy cutoff table remains supported and takes precedence.
-        cutoffs.update(read_cutoff_table(cutoff_table))
-    if not cutoff_table and not sensor_metadata_root:
-        raise ValueError("Provide a cutoff table or sensor metadata root.")
-    missing = [record["id"] for record in flights if record["id"] not in cutoffs]
-    if missing:
-        raise KeyError(f"No cutoff metadata for flights: {missing}")
-    return flights, cutoffs
+def load_flight_metadata(flights, sensor_metadata_root):
+    """Load fixed initial biases and cutoff timestamps for dataset flights."""
+    return apply_sensor_metadata(flights, sensor_metadata_root)
 
 
-def read_cutoff_table(path):
-    """Read dataset,data_name,cutoff_timestamp keyed like the initial bias tables.
-
-    The stable key is DATASET/CATEGORY/GROUP/flight_N (or DATASET/GROUP/flight_N).
-    Cutoffs must use the original CSV timestamp reference, not elapsed time.
-    """
-    result = {}
-    with open(path, newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        required = {"dataset", "data_name", "cutoff_timestamp"}
-        if not required <= set(reader.fieldnames or ()):
-            raise ValueError(f"Cutoff table requires columns {sorted(required)}.")
-        for line, row in enumerate(reader, 2):
-            dataset = row["dataset"].strip()
-            data_name = row["data_name"].strip().replace("\\", "/").strip("/")
-            key = f"{dataset}/{data_name}"
-            cutoff = float(row["cutoff_timestamp"])
-            if not dataset or not data_name or not math.isfinite(cutoff) or key in result:
-                raise ValueError(f"Invalid or duplicate cutoff at {path}:{line}.")
-            result[key] = cutoff
-    return result
-
-
-def read_flight_manifest(path):
-    """Resolve paths relative to the manifest. Each id must match the cutoff key."""
-    path = Path(path).resolve()
-    with path.open(encoding="utf-8") as handle:
-        flights = json.load(handle)
-    if not isinstance(flights, list) or not flights:
-        raise ValueError("Flight manifest must be a nonempty JSON list.")
+def read_dataset_flights(path):
+    """Build ESKF records from the train/test/eval TLab dataset config."""
+    config = ConfigFactory.parse_file(str(Path(path).resolve()))
+    if "dataset" in config:
+        config = config["dataset"]
+    split_names = {"train": "train", "test": "validation", "eval": "test"}
+    flights = []
     seen = set()
-    for flight in flights:
-        if flight["id"] in seen:
-            raise ValueError(f"Duplicate flight id: {flight['id']}")
-        seen.add(flight["id"])
-        if flight.get("split") not in ("train", "validation", "test"):
-            raise ValueError("Each flight requires split=train, validation, or test.")
-        for key in ("imu_csv", "vicon_csv", "ground_truth_csv", "px4_velocity_csv"):
-            flight[key] = str((path.parent / flight[key]).resolve())
+    for config_split, eskf_split in split_names.items():
+        if config_split not in config or "data_list" not in config[config_split]:
+            raise ValueError(f"Dataset config requires a {config_split}.data_list section.")
+        for source in config[config_split].data_list:
+            if str(source.get("name", "")) != "TLab":
+                continue
+            data_root = Path(str(source["data_root"]))
+            if not data_root.is_absolute():
+                data_root = Path.cwd() / data_root
+            data_root = data_root.resolve()
+            for drive in source.data_drive:
+                drive = str(drive).replace("\\", "/").strip("/")
+                flight_id = f"{data_root.name}/{drive}"
+                if flight_id in seen:
+                    raise ValueError(f"Flight appears in more than one split: {flight_id}")
+                seen.add(flight_id)
+                flight_dir = data_root / drive
+                imu_csv, data_csv = flight_dir / "imu.csv", flight_dir / "data.csv"
+                missing = [str(item) for item in (imu_csv, data_csv) if not item.is_file()]
+                if missing:
+                    raise FileNotFoundError(f"Missing TLab flight files: {missing}")
+                flights.append({
+                    "id": flight_id,
+                    "split": eskf_split,
+                    "imu_csv": str(imu_csv),
+                    "data_csv": str(data_csv),
+                })
+    if not flights:
+        raise ValueError("Dataset config contains no TLab flights.")
     return flights
 
 
@@ -241,20 +227,16 @@ def _interpolate_quaternion(timestamps, quaternions, target):
 
 
 def prepare_flight(record, cutoff_timestamp, ekf):
-    """Initialize with Vicon pose/PX4 velocity and keep genuine aiding arrivals.
+    """Initialize and replay the standard aligned TLab IMU/Vicon files.
 
-    Vicon event CSV: time,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,
-                     quat_w,quat_x,quat_y,quat_z.
-    GT CSV: time,vel_x,vel_y,vel_z (aligned data.csv is suitable for GT).
-    PX4 CSV: time,vel_x,vel_y,vel_z in the SAME navigation frame.
+    data.csv: time,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,
+              quat_w,quat_x,quat_y,quat_z.
     """
     imu = read_numeric_csv(record["imu_csv"], (
         "time", "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"))
-    vicon = read_numeric_csv(record["vicon_csv"], (
+    vicon = read_numeric_csv(record["data_csv"], (
         "time", "pos_x", "pos_y", "pos_z", "vel_x", "vel_y", "vel_z",
         "quat_w", "quat_x", "quat_y", "quat_z"))
-    gt = read_numeric_csv(record["ground_truth_csv"], ("time", "vel_x", "vel_y", "vel_z"))
-    px4 = read_numeric_csv(record["px4_velocity_csv"], ("time", "vel_x", "vel_y", "vel_z"))
     start = float(record.get("start_timestamp", imu[0, 0]))
     end = float(cutoff_timestamp) + 25.
     if start >= cutoff_timestamp or float(imu[-1, 0]) < end:
@@ -275,7 +257,7 @@ def prepare_flight(record, cutoff_timestamp, ekf):
     initial_time = times[:1]
     position = interpolate(aided_vicon[:, 0], aided_vicon[:, 1:4], initial_time)[0]
     quaternion = _interpolate_quaternion(aided_vicon[:, 0], aided_vicon[:, 7:11], times[0])
-    velocity = interpolate(px4[:, 0], px4[:, 1:4], initial_time)[0]
+    velocity = interpolate(aided_vicon[:, 0], aided_vicon[:, 4:7], initial_time)[0]
     state, covariance = ekf.initialize(position, velocity, quaternion,
         record.get("initial_accel_bias"), record.get("initial_gyro_bias"))
     events = []
@@ -287,7 +269,7 @@ def prepare_flight(record, cutoff_timestamp, ekf):
                         "velocity": row[4:7], "yaw": row[7:11]}
         for channel in ekf.observation_types:
             events.append(ViconEvent(timestamp, channel, observations[channel]))
-    gt_velocity = interpolate(gt[:, 0], gt[:, 1:4], times)
+    gt_velocity = interpolate(vicon[:, 0], vicon[:, 4:7], times)
     return dict(raw_acceleration=selected[:, 1:4].to(ekf.gravity.device),
                 raw_gyroscope=selected[:, 4:7].to(ekf.gravity.device),
                 imu_time=times.to(ekf.gravity.device), vicon_events=events,

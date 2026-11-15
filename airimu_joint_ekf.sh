@@ -31,19 +31,16 @@ if [[ -n "$checkpoint" ]]; then
     [[ -f "$checkpoint" ]] || { echo "ERROR: checkpoint not found: $checkpoint" >&2; exit 2; }
     checkpoint_args=(--ckpt "$checkpoint")
 fi
-flights=${EKF_FLIGHTS:-configs/ekf/flights.json}
+dataset_config=${EKF_DATASET_CONFIG:-configs/datasets/TLab/tlab_body.conf}
 sensor_metadata_root=${SENSOR_METADATA_ROOT:-initial_sensor_biases}
 epochs=${EKF_EPOCHS:-30}
 learning_rate=${EKF_LR:-1e-4}
 cpu_threads=${EKF_CPU_THREADS:-8}
 run_fixed_baseline=${EKF_FIXED_BASELINE:-1}
 
-for required_file in "$config" "$flights"; do
+for required_file in "$config" "$dataset_config"; do
     if [[ ! -f "$required_file" ]]; then
         echo "ERROR: required file not found: $required_file" >&2
-        if [[ "$required_file" == "$flights" ]]; then
-            echo "Create it from configs/ekf/flights.example.json with real Vicon-event and PX4-velocity CSV paths." >&2
-        fi
         exit 2
     fi
 done
@@ -62,7 +59,7 @@ fixed_evaluation="$run_root/evaluation_fixed"
 echo "Joint differentiable ESKF training"
 echo "Run root: $run_root"
 echo "Initialization: ${checkpoint:-scratch (encoder and covariance heads)}"
-echo "Flight manifest: $flights"
+echo "Dataset config: $dataset_config"
 echo "Sensor metadata: $sensor_metadata_root"
 echo "Epochs: $epochs; learning rate: $learning_rate"
 echo "Working directory: $(pwd)"
@@ -74,7 +71,7 @@ fi
 python3 -u train_eskf.py \
 --config "$config" \
 "${checkpoint_args[@]}" \
---flights "$flights" \
+--dataset-config "$dataset_config" \
 --sensor-metadata-root "$sensor_metadata_root" \
 --output "$training_output" \
 --device "$device" \
@@ -91,7 +88,7 @@ echo "Training finished. Evaluating learned covariance on the test split."
 python3 -u -m evaluation.evaluate_eskf \
 --config "$config" \
 --ckpt "$training_output/best_model.ckpt" \
---flights "$flights" \
+--dataset-config "$dataset_config" \
 --sensor-metadata-root "$sensor_metadata_root" \
 --output "$learned_evaluation" \
 --split test \
@@ -101,7 +98,7 @@ python3 -u -m evaluation.evaluate_eskf \
 if [[ "$run_fixed_baseline" == "1" ]]; then
     echo "Evaluating the fixed-noise EKF baseline on the same test split."
         python3 -u -m evaluation.evaluate_eskf \
-    --flights "$flights" \
+    --dataset-config "$dataset_config" \
     --sensor-metadata-root "$sensor_metadata_root" \
     --output "$fixed_evaluation" \
     --split test \

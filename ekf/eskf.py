@@ -100,7 +100,7 @@ def _finite_shape(value: Tensor, shape, name: str):
 
 
 class DifferentiableESKF(nn.Module):
-    """Fixed 15-state ESKF. Defaults match horizontal PX4 Vicon aiding.
+    """Fixed 15-state ESKF with horizontal Vicon aiding defaults.
 
     Scalar gravity selects z-up navigation: [0, 0, -gravity]. For NED pass
     an explicit vector, e.g. gravity=(0, 0, 9.80665), with matching body/pose
@@ -134,7 +134,7 @@ class DifferentiableESKF(nn.Module):
 
     def initialize(self, initial_position, initial_velocity, initial_quaternion,
                    initial_accel_bias=None, initial_gyro_bias=None, initial_covariance=None):
-        """Fixed Vicon pose and recorded PX4 velocity, never reused at cutoff."""
+        """Fixed initial pose and velocity, never reused at cutoff."""
         values = (initial_position, initial_velocity, initial_quaternion,
                   [0.]*3 if initial_accel_bias is None else initial_accel_bias,
                   [0.]*3 if initial_gyro_bias is None else initial_gyro_bias)

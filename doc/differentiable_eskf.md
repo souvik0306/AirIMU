@@ -91,57 +91,33 @@ bias_samples,accel_bias_x_mps2,accel_bias_y_mps2,accel_bias_z_mps2,
 gyro_bias_x_radps,gyro_bias_y_radps,gyro_bias_z_radps
 ```
 
-The loader matches `group` and `flight_number` to the manifest id, maps the July
+The loader matches `group` and `flight_number` to the dataset flight id, maps the July
 dataset's `UN` group to `AI`, initializes the EKF bias state from the six bias
 columns, and uses `cutoff_ros_epoch_s` directly in the IMU timestamp reference.
 `cutoff_rosbag_s` is retained as provenance and is never guessed or rebased.
 
-The legacy standalone cutoff table remains supported. It can be used by itself,
-or passed together with sensor metadata to override only the cutoff timestamps.
+The ESKF reads the existing TLab HOCON dataset config directly. Its `train`,
+`test`, and `eval` sections become the ESKF training, validation, and test splits.
+Each selected `data_root/data_drive` directory requires:
 
-Copy [the cutoff template](../configs/ekf/cutoffs.csv.example) and supply a row per
-flight. For example, this is the schema (replace `TIMESTAMP_SECONDS` with the
-actual cutoff, using the original IMU/Vicon timestamp reference):
-
-```csv
-dataset,data_name,cutoff_timestamp
-T-Lab_10th_September_dataset,High-Dynamic/AI/flight_1,TIMESTAMP_SECONDS
-```
-
-The key `dataset/data_name` must equal the manifest `id`. This uses the same
-dataset/category/group/flight identity as the initial sensor bias workflow.
-The table does not invent cutoff values or convert elapsed seconds to epoch time.
-
-Copy [the flight manifest](../configs/ekf/flights.example.json), select disjoint
-`train`, `validation`, and `test` flights, and set the file paths. Paths are relative
-to the manifest. Each flight requires:
-
-| Input | CSV columns |
+| File | CSV columns |
 | --- | --- |
-| `imu_csv` | `time,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z` |
-| `vicon_csv` | `time,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,quat_w,quat_x,quat_y,quat_z` |
-| `ground_truth_csv` | `time,vel_x,vel_y,vel_z` (additional columns are allowed) |
-| `px4_velocity_csv` | `time,vel_x,vel_y,vel_z` |
+| `imu.csv` | `time,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z` |
+| `data.csv` | `time,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,quat_w,quat_x,quat_y,quat_z` |
 
-All timestamps are seconds in the **same reference**. Export Vicon measurements
-once at their original measurement timestamps. The aligned TLab `data.csv` can be
-used as `ground_truth_csv`; repeated/resampled GT rows must not be presented as
-new aiding observations. Identical values alone cannot distinguish a stationary
-measurement from a repeated observation, so the original event timestamps are needed.
+All timestamps are seconds in the **same reference**. The standard aligned
+`data.csv` supplies Vicon pose and velocity for initialization, pre-cutoff aiding,
+and the post-cutoff velocity target.
 
-The loader initializes position and attitude from pre-cutoff Vicon and velocity
-from recorded **PX4** velocity at the first selected IMU timestamp. It uses linear
-interpolation for fixed recorded position/velocity and shortest-arc SLERP for the
-initial attitude, with no extrapolation. Optional manifest `start_timestamp`
-selects the aided trajectory's beginning (first IMU sample at or after that time).
-Bias means default to zero; optional `initial_accel_bias` and `initial_gyro_bias`
-are three-element arrays in the IMU body frame. No bias is pre-subtracted from IMU.
+The loader initializes position, velocity, and attitude from pre-cutoff Vicon at
+the first IMU timestamp. It uses linear interpolation for position/velocity and
+shortest-arc SLERP for attitude, with no extrapolation. Initial accelerometer and
+gyroscope biases come from `initial_sensor_biases`. No bias is pre-subtracted from IMU.
 
 Flights must cover the complete evaluation interval and contain aiding after
 initialization. The loader ends replay at exactly `cutoff+25`, inserting a terminal
 output timestamp inside the last held IMU interval if necessary. Vicon after
-cutoff is used only as GT. The PX4 recording needs initial-time coverage for
-training and evaluation-interval coverage for a complete PX4 comparison report.
+cutoff is used only as ground truth.
 
 ## Run training and evaluation
 
@@ -151,7 +127,7 @@ Use the existing PyTorch environment with the repository requirements installed:
 python train_eskf.py \
   --config configs/exp/TLab/finetune_motion_body_stage2.conf \
   --ckpt path/to/matching_airimu_checkpoint.ckpt \
-  --flights configs/ekf/flights.json \
+  --dataset-config configs/datasets/TLab/tlab_body.conf \
   --sensor-metadata-root initial_sensor_biases \
   --output experiments/eskf_run --device cuda:0 --epochs 10
 ```
@@ -176,27 +152,23 @@ Evaluate learned covariance or a fixed-noise baseline:
 python -m evaluation.evaluate_eskf \
   --config configs/exp/TLab/finetune_motion_body_stage2.conf \
   --ckpt experiments/eskf_run/best_model.ckpt \
-  --flights configs/ekf/flights.json \
+  --dataset-config configs/datasets/TLab/tlab_body.conf \
   --sensor-metadata-root initial_sensor_biases \
   --output experiments/eskf_run/evaluation --split test
 
 python -m evaluation.evaluate_eskf \
   --accel-variance 0.001 --gyro-variance 0.001 \
-  --flights configs/ekf/flights.json \
+  --dataset-config configs/datasets/TLab/tlab_body.conf \
   --sensor-metadata-root initial_sensor_biases \
   --output experiments/eskf_fixed/evaluation --split test
 ```
 
 Both commands accept `--gravity GX GY GZ`. Set it to the selected flight navigation
 convention and gravity magnitude, with matching recorded poses and velocities.
-Fixed baseline variances are configurable per-sample values; they are not inferred
-from the real PX4 process-noise parameters.
+Fixed baseline variances are configurable per-sample values.
 
 Evaluation saves full state/bias/covariance trajectories and reports horizontal
-EKF–Vicon, PX4–Vicon, and EKF–PX4 errors on the same interval when PX4 data covers
-it. This is a prototype ESKF mechanism comparison; it does not duplicate all PX4
-EKF2 timing, gating, calibration, or discretization behavior. Actual-flight
-agreement must be assessed after supplying cutoffs and the recorded source data.
+EKF–Vicon error on the evaluation interval.
 
 ## Python interface and acceptance checks
 
@@ -205,7 +177,7 @@ import torch
 from ekf import DifferentiableESKF, run_ekf_sequence, horizontal_velocity_loss
 
 ekf = DifferentiableESKF().to(device)
-state, P = ekf.initialize(vicon_initial_position, px4_initial_velocity,
+state, P = ekf.initialize(vicon_initial_position, vicon_initial_velocity,
                           vicon_initial_quaternion_wxyz)
 imu_variance = torch.full((len(imu_time), 6), .001,
                           dtype=torch.float64, device=device, requires_grad=True)
@@ -233,6 +205,5 @@ The suite covers initialization, gravity, quaternion and bias propagation,
 covariance symmetry/PSD and units, finite-difference transition/reset/yaw
 Jacobians, event splitting and cutoff continuity, autograd/finite-difference
 agreement, pre/post-cutoff sensitivity, real CodeNet covariance-head gradients,
-frozen weights/buffers, input interpolation, and cutoff-table matching.
+frozen weights/buffers, input interpolation, and sensor-metadata matching.
 It includes a full 200 Hz replay through cutoff+25 seconds with backpropagation.
-Recorded-flight PX4 acceptance requires the real cutoff table and recordings.
