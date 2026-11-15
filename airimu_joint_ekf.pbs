@@ -8,7 +8,9 @@
 # Submit with:
 #   qsub airimu_joint_ekf.pbs
 # Override inputs or runtime settings with:
-#   qsub -v EKF_FLIGHTS=/absolute/path/flights.json,EKF_EPOCHS=10 airimu_joint_ekf.pbs
+#   qsub -v EKF_FLIGHTS=/absolute/path/flights.json,EKF_EPOCHS=30 airimu_joint_ekf.pbs
+# AIRIMU_MAX_EPOCHES is optional; when unset, Stage 1 and Stage 2 use their
+# full configured epoch counts. It is intended only for short flow checks.
 
 set -euo pipefail
 
@@ -16,21 +18,21 @@ cd "$PBS_O_WORKDIR"
 module load apptainer/1.4.1
 
 image=/app1/common/singularity-img/vanda/pytorch_2.5_cuda_12.4_unsloth.sif
-config=${EKF_CONFIG:-configs/exp/TLab/4th_Nov_Scratch_stage2.conf}
-checkpoint=${AIRIMU_CKPT:-}
-checkpoint_args=()
-if [[ -n "$checkpoint" ]]; then
-    [[ -f "$checkpoint" ]] || { echo "ERROR: checkpoint not found: $checkpoint" >&2; exit 2; }
-    checkpoint_args=(--ckpt "$checkpoint")
-fi
+stage1_config=${STAGE1_CONFIG:-configs/exp/TLab/4th_Nov_Scratch.conf}
+stage2_config=${STAGE2_CONFIG:-configs/exp/TLab/4th_Nov_Scratch_stage2.conf}
 flights=${EKF_FLIGHTS:-configs/ekf/flights.json}
 sensor_metadata_root=${SENSOR_METADATA_ROOT:-initial_sensor_biases}
-epochs=${EKF_EPOCHS:-30}
-learning_rate=${EKF_LR:-1e-4}
+ekf_epochs=${EKF_EPOCHS:-30}
+ekf_learning_rate=${EKF_LR:-1e-5}
 cpu_threads=${EKF_CPU_THREADS:-8}
 run_fixed_baseline=${EKF_FIXED_BASELINE:-1}
 
-for required_file in "$config" "$flights"; do
+airimu_epoch_args=()
+if [[ -n "${AIRIMU_MAX_EPOCHES:-}" ]]; then
+    airimu_epoch_args=(--max_epoches "$AIRIMU_MAX_EPOCHES")
+fi
+
+for required_file in "$stage1_config" "$stage2_config" "$flights"; do
     if [[ ! -f "$required_file" ]]; then
         echo "ERROR: required file not found: $required_file" >&2
         if [[ "$required_file" == "$flights" ]]; then
@@ -47,42 +49,75 @@ fi
 run_timestamp=$(TZ=Asia/Singapore date +%Y%m%d_%H%M%S_SGT)
 job_id=${PBS_JOBID%%.*}
 run_root=${EKF_RUN_ROOT:-experiments/${run_timestamp}_job${job_id}/joint_ekf}
-training_output="$run_root/training"
+stage1_output="$run_root/airimu_stage1"
+stage2_output="$run_root/airimu_stage2"
+ekf_training_output="$run_root/ekf_training"
 learned_evaluation="$run_root/evaluation_learned"
 fixed_evaluation="$run_root/evaluation_fixed"
 
-echo "Joint differentiable ESKF training"
+echo "Full scratch AirIMU and joint differentiable ESKF training"
 echo "Run root: $run_root"
-echo "Initialization: ${checkpoint:-scratch (encoder and covariance heads)}"
 echo "Flight manifest: $flights"
 echo "Sensor metadata: $sensor_metadata_root"
-echo "Epochs: $epochs; learning rate: $learning_rate"
+echo "ESKF epochs: $ekf_epochs; ESKF learning rate: $ekf_learning_rate"
 echo "Working directory: $(pwd)"
 echo "Compute node: $(hostname)"
 nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
 
+echo "Starting AirIMU Stage 1 from random initialization."
+apptainer exec --nv -e "$image" \
+python3 -u train_motion_finetune.py \
+--config "$stage1_config" \
+--exp_dir "$stage1_output" \
+--pretrained_ckpt none \
+--device cuda:0 \
+"${airimu_epoch_args[@]}"
+
+stage1_checkpoint="$stage1_output/ckpt/best_model.ckpt"
+if [[ ! -f "$stage1_checkpoint" ]]; then
+    echo "ERROR: AirIMU Stage 1 completed without best_model.ckpt" >&2
+    exit 3
+fi
+
+echo "Starting AirIMU Stage 2 from this job's new Stage 1 checkpoint."
+apptainer exec --nv -e "$image" \
+python3 -u train_motion_finetune.py \
+--config "$stage2_config" \
+--exp_dir "$stage2_output" \
+--pretrained_ckpt "$stage1_checkpoint" \
+--non_strict_pretrained \
+--device cuda:0 \
+"${airimu_epoch_args[@]}"
+
+stage2_checkpoint="$stage2_output/ckpt/best_model.ckpt"
+if [[ ! -f "$stage2_checkpoint" ]]; then
+    echo "ERROR: AirIMU Stage 2 completed without best_model.ckpt" >&2
+    exit 4
+fi
+
+echo "Starting joint ESKF training from this job's new Stage 2 checkpoint."
 apptainer exec --nv -e "$image" \
 python3 -u train_eskf.py \
---config "$config" \
-"${checkpoint_args[@]}" \
+--config "$stage2_config" \
+--ckpt "$stage2_checkpoint" \
 --flights "$flights" \
 --sensor-metadata-root "$sensor_metadata_root" \
---output "$training_output" \
+--output "$ekf_training_output" \
 --device cuda:0 \
---epochs "$epochs" \
---lr "$learning_rate" \
+--epochs "$ekf_epochs" \
+--lr "$ekf_learning_rate" \
 --cpu-threads "$cpu_threads"
 
-if [[ ! -f "$training_output/best_model.ckpt" ]]; then
+if [[ ! -f "$ekf_training_output/best_model.ckpt" ]]; then
     echo "ERROR: ESKF training completed without best_model.ckpt" >&2
-    exit 3
+    exit 5
 fi
 
 echo "Training finished. Evaluating learned covariance on the test split."
 apptainer exec --nv -e "$image" \
 python3 -u -m evaluation.evaluate_eskf \
---config "$config" \
---ckpt "$training_output/best_model.ckpt" \
+--config "$stage2_config" \
+--ckpt "$ekf_training_output/best_model.ckpt" \
 --flights "$flights" \
 --sensor-metadata-root "$sensor_metadata_root" \
 --output "$learned_evaluation" \
@@ -102,4 +137,4 @@ if [[ "$run_fixed_baseline" == "1" ]]; then
     --cpu-threads "$cpu_threads"
 fi
 
-echo "Joint ESKF training and evaluation finished: $run_root"
+echo "Scratch AirIMU, joint ESKF training, and evaluation finished: $run_root"
