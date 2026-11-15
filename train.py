@@ -1,4 +1,5 @@
 import os
+import json
 import torch
 import numpy as np
 
@@ -54,7 +55,7 @@ class _LossMetrics:
 
 
 def print_corrected_calibration_metrics(split, metrics, propcov):
-    """Print Stage 1 trajectory and calibration metrics to the job log."""
+    """Print trajectory and covariance-calibration metrics to the job log."""
     print(
         f"{split} corrected trajectory metrics: "
         f"pos_rmse={metrics['corrected_pos_rmse']:.6f}, "
@@ -71,7 +72,14 @@ def print_corrected_calibration_metrics(split, metrics, propcov):
         'corrected_vel_2sigma',
     )
     if not all(key in metrics for key in corrected_covariance_keys):
-        # Stage 2 retains its existing raw-covariance metric names.
+        raw_covariance_keys = ('vel_nees', 'vel_1sigma', 'vel_2sigma')
+        if all(key in metrics for key in raw_covariance_keys):
+            print(
+                f"{split} raw covariance calibration: "
+                f"vel_nees={metrics['vel_nees']:.6f}, "
+                f"vel_1sigma={metrics['vel_1sigma']:.6f}, "
+                f"vel_2sigma={metrics['vel_2sigma']:.6f}"
+            )
         return
 
     print(
@@ -91,7 +99,8 @@ def train(network, loader, confs, epoch, optimizer):
     network.train()
     if confs.get('stage', 1) == 2:
         uncertainty_keys = (
-            'raw_vel_rmse', 'vel_nees', 'vel_1sigma', 'vel_2sigma', 'vel_nll',
+            'raw_vel_rmse', 'vel_nees', 'vel_1sigma', 'vel_2sigma',
+            'rot_nll', 'vel_nll', 'pos_nll', 'cov_nll',
         )
     else:
         uncertainty_keys = (
@@ -198,6 +207,24 @@ def write_wandb(header, objs, epoch_i):
             wandb.log(metrics, step=epoch_i)
     else:
         wandb.log({header: objs}, step = epoch_i)
+
+
+def save_wandb_run_metadata(exp_dir):
+    """Persist enough W&B identity for post-training artifact uploads."""
+    if wandb.run is None:
+        return None
+
+    metadata = {
+        "id": wandb.run.id,
+        "project": wandb.run.project,
+        "entity": wandb.run.entity,
+        "name": wandb.run.name,
+    }
+    metadata_path = os.path.join(exp_dir, "wandb_run.json")
+    with open(metadata_path, "w") as handle:
+        json.dump(metadata, handle, indent=2)
+    print(f"saved W&B run metadata to {metadata_path}")
+    return metadata_path
 
 
 def log_used_data_paths(conf):
@@ -347,6 +374,7 @@ if __name__ == '__main__':
                     config= conf.train, 
                     group = conf.train.network, 
                     name  = conf_name,)
+        save_wandb_run_metadata(conf.general.exp_dir)
         log_used_data_paths(conf)
 
     ## optimizer

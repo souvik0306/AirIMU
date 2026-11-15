@@ -4,6 +4,7 @@ import pypose as pp
 import math
 
 import torch.nn as nn
+import torch.nn.functional as F
 from model.net import ModelBase
 from model.cnn import CNNEncoder
 
@@ -51,26 +52,24 @@ class CodeNet(ModelBase):
             acc_std = conf.acc_std
         self.register_buffer('acc_std', torch.tensor(acc_std))
 
-        # Hard ceiling on predicted variance so the covariance head cannot
-        # "cheat" the NLL loss by inflating uncertainty without limit.
-        # cov_max is the original datasheet noise density, squared (never to
-        # be exceeded); cov_target is the desired operating point (1/5 of the
-        # datasheet std) used only to seed initialization and as a soft
-        # regularization anchor in losses.py — the model can still use the
-        # full range up to cov_max when the data genuinely demands it.
-        # Non-persistent: these are config-derived constants, not learned
-        # state, so they must never appear in / be restored from a checkpoint
-        # (older checkpoints predate these keys and would fail a strict load).
-        acc_cov_min = conf.get("acc_cov_min", 0.01 ** 2)
-        acc_cov_max = conf.get("acc_cov_max", 0.35 ** 2)
-        self.acc_cov_target = conf.get("acc_cov_target", 0.07 ** 2)
-        gyro_cov_min = conf.get("gyro_cov_min", 0.0001 ** 2)
-        gyro_cov_max = conf.get("gyro_cov_max", 0.015 ** 2)
-        self.gyro_cov_target = conf.get("gyro_cov_target", 0.003 ** 2)
-        self.register_buffer('acc_cov_min', torch.tensor(acc_cov_min), persistent=False)
-        self.register_buffer('acc_cov_max', torch.tensor(acc_cov_max), persistent=False)
-        self.register_buffer('gyro_cov_min', torch.tensor(gyro_cov_min), persistent=False)
-        self.register_buffer('gyro_cov_max', torch.tensor(gyro_cov_max), persistent=False)
+        # Stage 2 predicts an unbounded positive variance using softplus. The
+        # epsilon is only a numerical floor for Cholesky/NLL stability; it is
+        # deliberately not a learned-uncertainty ceiling.
+        covariance_epsilon = float(conf.get("covariance_epsilon", 1e-6))
+        if covariance_epsilon <= 0:
+            raise ValueError(
+                f"covariance_epsilon must be positive, got {covariance_epsilon}."
+            )
+        self.register_buffer(
+            'covariance_epsilon',
+            torch.tensor(covariance_epsilon),
+            persistent=False,
+        )
+        self.acc_cov_target = float(conf.get("acc_cov_target", 0.07 ** 2))
+        self.gyro_cov_target = float(conf.get("gyro_cov_target", 0.003 ** 2))
+        self.use_initial_sensor_bias = bool(
+            conf.get("use_initial_sensor_bias", False)
+        )
 
         ## the encoder have the same correction in one interval 
         self.interval = 9
@@ -91,35 +90,82 @@ class CodeNet(ModelBase):
         # Lets the covariance heads scale their output by how much bias the
         # correction network thinks it just removed, without ever feeding the
         # correction itself downstream (the deployed EKF only consumes raw
-        # acc/gyro + this covariance). Zero-initialized so Stage 2 starts out
-        # identical to the plain sigmoid-bounded heads and only learns to use
-        # this signal if it actually helps the NLL.
+        # acc/gyro + this covariance). Zero-initialized so Stage 2 starts at
+        # the configured softplus target and only learns to use this signal if
+        # it actually helps the NLL.
         self.acc_bias_gain = nn.Linear(3, 3, bias=False)
         self.gyro_bias_gain = nn.Linear(3, 3, bias=False)
-        nn.init.zeros_(self.acc_bias_gain.weight)
-        nn.init.zeros_(self.gyro_bias_gain.weight)
 
+        self._stage2_frozen_modules = ()
         self.reset_cov_heads()
 
     def reset_cov_heads(self):
-        """(Re-)seed the covariance heads at the desired target (not the
-        sigmoid midpoint), so training has to justify raising uncertainty
-        above it. Must be called again after loading a pretrained checkpoint:
-        those heads are dead weight carried over from a propcov=False stage
-        and would otherwise silently overwrite this initialization.
+        """Reset every trainable uncertainty-head parameter.
+
+        Stage 2 calls this *after* loading Stage 1. Resetting only the final
+        projection would retain hidden covariance features from Stage 1 and
+        would therefore not be a clean uncertainty-head restart.
         """
-        conf = self.conf
-        acc_default_fraction = (self.acc_cov_target - self.acc_cov_min) / (self.acc_cov_max - self.acc_cov_min)
-        gyro_default_fraction = (self.gyro_cov_target - self.gyro_cov_min) / (self.gyro_cov_max - self.gyro_cov_min)
-        acc_init_fraction = conf.get("acc_cov_init_fraction", conf.get("cov_init_fraction", acc_default_fraction))
-        gyro_init_fraction = conf.get("gyro_cov_init_fraction", conf.get("cov_init_fraction", gyro_default_fraction))
-        for decoder, init_fraction in (
-            (self.acccov_decoder, acc_init_fraction),
-            (self.gyrocov_decoder, gyro_init_fraction),
+        epsilon = float(self.covariance_epsilon)
+        for name, decoder, target in (
+            ("acc_cov_target", self.acccov_decoder, self.acc_cov_target),
+            ("gyro_cov_target", self.gyrocov_decoder, self.gyro_cov_target),
         ):
+            softplus_target = float(target) - epsilon
+            if softplus_target <= 0:
+                raise ValueError(
+                    f"{name} must be greater than covariance_epsilon "
+                    f"({epsilon}), got {target}."
+                )
+            for layer in decoder:
+                if isinstance(layer, nn.Linear):
+                    layer.reset_parameters()
             last_linear = decoder[-1]
             nn.init.zeros_(last_linear.weight)
-            nn.init.constant_(last_linear.bias, math.log(float(init_fraction) / (1 - float(init_fraction))))
+            # Stable inverse of softplus(y) = log(1 + exp(x)).
+            init_bias = softplus_target + math.log(-math.expm1(-softplus_target))
+            nn.init.constant_(last_linear.bias, init_bias)
+
+        # These layers are part of the uncertainty prediction path, not the
+        # correction path. Zero initialization makes a fresh Stage 2 begin at
+        # the configured variance target without correction-dependent scaling.
+        nn.init.zeros_(self.acc_bias_gain.weight)
+        nn.init.zeros_(self.gyro_bias_gain.weight)
+
+    def configure_stage2_training(self):
+        """Freeze Stage 1 and expose only uncertainty-head parameters."""
+        uncertainty_modules = (
+            self.acccov_decoder,
+            self.gyrocov_decoder,
+            self.acc_bias_gain,
+            self.gyro_bias_gain,
+        )
+        frozen_modules = (
+            self.cnn,
+            self.gru1,
+            self.gru2,
+            self.accdecoder,
+            self.gyrodecoder,
+        )
+
+        for parameter in self.parameters():
+            parameter.requires_grad_(False)
+        for module in uncertainty_modules:
+            module.requires_grad_(True)
+
+        self._stage2_frozen_modules = frozen_modules
+        for module in frozen_modules:
+            module.eval()
+
+        return [parameter for parameter in self.parameters() if parameter.requires_grad]
+
+    def train(self, mode=True):
+        """Keep a frozen Stage 1 backbone deterministic during Stage 2."""
+        super().train(mode)
+        if mode:
+            for module in self._stage2_frozen_modules:
+                module.eval()
+        return self
 
     def encoder(self, x):
         x = self.cnn(x.transpose(-1,-2)).transpose(-1,-2)
@@ -133,15 +179,12 @@ class CodeNet(ModelBase):
         # estimated bias magnitude, it must not let the covariance loss steer
         # the correction network (that is the state loss's job alone).
         correction = correction.detach()
-        acc_logit = self.acccov_decoder(x) + self.acc_bias_gain(correction[..., :3])
-        gyro_logit = self.gyrocov_decoder(x) + self.gyro_bias_gain(correction[..., 3:])
+        acc_raw = self.acccov_decoder(x) + self.acc_bias_gain(correction[..., :3])
+        gyro_raw = self.gyrocov_decoder(x) + self.gyro_bias_gain(correction[..., 3:])
 
-        # Bounded sigmoid parameterization: variance is always within
-        # [cov_min, cov_max] regardless of the raw network output, so the
-        # model cannot drive uncertainty above the sensor's physical noise
-        # floor to minimize the NLL loss.
-        acc = self.acc_cov_min + (self.acc_cov_max - self.acc_cov_min) * torch.sigmoid(acc_logit)
-        gyro = self.gyro_cov_min + (self.gyro_cov_max - self.gyro_cov_min) * torch.sigmoid(gyro_logit)
+        # Positive, numerically safe and intentionally unbounded above.
+        acc = F.softplus(acc_raw) + self.covariance_epsilon
+        gyro = F.softplus(gyro_raw) + self.covariance_epsilon
 
         return torch.cat([acc, gyro], dim = -1)
 
@@ -150,6 +193,35 @@ class CodeNet(ModelBase):
         gyro = self.gyrodecoder(x) * self.gyro_std
 
         return torch.cat([acc, gyro], dim = -1)
+
+    def bias_correct_raw_imu(self, data):
+        """Subtract the flight's fixed EKF2 bias without changing network input."""
+        required = ("initial_acc_bias", "initial_gyro_bias")
+        missing = [key for key in required if key not in data]
+        if missing:
+            raise KeyError(
+                "Stage 2 initial bias subtraction is enabled, but the batch is "
+                f"missing {missing}."
+            )
+
+        acc_bias = data["initial_acc_bias"]
+        gyro_bias = data["initial_gyro_bias"]
+        batch_size = data["acc"].shape[0]
+        expected_shape = (batch_size, 3)
+        if (
+            tuple(acc_bias.shape) != expected_shape
+            or tuple(gyro_bias.shape) != expected_shape
+        ):
+            raise ValueError(
+                "Initial sensor biases must both have shape [batch, 3]; got "
+                f"acc={tuple(acc_bias.shape)}, gyro={tuple(gyro_bias.shape)}."
+            )
+
+        # Skip the synthetic CNN context exactly as for the unmodified Stage 2
+        # integration. The encoder above still consumes the original raw IMU.
+        acc = data['acc'][:, self.interval:, :] - acc_bias[:, None, :]
+        gyro = data['gyro'][:, self.interval:, :] - gyro_bias[:, None, :]
+        return acc, gyro
 
     def _update(self, to_update, feat, frame_len):
         """Scatter corrections over the original sequence length.
@@ -282,11 +354,10 @@ class CodeNet(ModelBase):
             result['gyro_cov'] = inference_state['cov_state']['gyro_cov']
 
         if self.conf.propcov and is_stage2:
-            # Covariance must be supervised against the *raw* (uncorrected) IMU
-            # drift, not the corrected signal: deployment feeds raw acc/gyro plus
-            # this learned covariance straight into the EKF, never the correction
-            # itself, so the covariance has to characterize the error the EKF will
-            # actually see. The bias-correction knowledge instead reaches the
+            # Covariance is supervised against raw IMU after subtracting the one
+            # fixed EKF2 initial bias for this flight. The encoder still receives
+            # untouched raw IMU, and learned AirIMU corrections are not applied to
+            # this integration target. The correction knowledge instead reaches the
             # covariance heads through cov_decoder's acc/gyro_bias_gain (see
             # inference()), which conditions the predicted variance on the
             # detected bias magnitude without altering what's fed downstream.
@@ -295,8 +366,13 @@ class CodeNet(ModelBase):
             # in export/inference), so the calibrated uncertainty stays valid
             # outside of training.
             raw_data = dict(data)
-            raw_data['corrected_acc'] = data['acc'][:, self.interval:, :]
-            raw_data['corrected_gyro'] = data['gyro'][:, self.interval:, :]
+            if self.use_initial_sensor_bias:
+                raw_acc, raw_gyro = self.bias_correct_raw_imu(data)
+            else:
+                raw_acc = data['acc'][:, self.interval:, :]
+                raw_gyro = data['gyro'][:, self.interval:, :]
+            raw_data['corrected_acc'] = raw_acc
+            raw_data['corrected_gyro'] = raw_gyro
             raw_state = self.integrate(
                 init_state=init_state,
                 data=raw_data,

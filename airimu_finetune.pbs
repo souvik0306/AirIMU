@@ -46,7 +46,7 @@ python3 -u train_motion_finetune.py \
 --pretrained_ckpt "$stage1_pretrained" \
 --device cuda:0
 
-echo "Stage 1 finished. Starting Stage 2 (covaug=True)"
+echo "Stage 1 finished. Starting Stage 2 (frozen backbone, raw-IMU covariance NLL)"
 
 if [[ ! -f "$stage1_exp/ckpt/best_model.ckpt" ]]; then
     echo "ERROR: Stage 1 completed without best_model.ckpt" >&2

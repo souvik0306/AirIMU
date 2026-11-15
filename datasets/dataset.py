@@ -106,9 +106,11 @@ class SeqeuncesDataset(Data.Dataset):
             self.gt_pos,
             self.gt_ori,
             self.gt_velo,
+            self.initial_acc_bias,
+            self.initial_gyro_bias,
             self.index_map,
             self.seq_idx,
-        ) = ([], [], [], [], [], [], [], [], 0)
+        ) = ([], [], [], [], [], [], [], [], [], [], 0)
         self.uni = torch.distributions.uniform.Uniform(-torch.ones(1), torch.ones(1))
         self.device = device
         self.conf = data_set_config
@@ -146,6 +148,15 @@ class SeqeuncesDataset(Data.Dataset):
         self.gt_pos.append(seq.data["gt_translation"][start_frame:end_frame+1])
         self.gt_ori.append(seq.data["gt_orientation"][start_frame:end_frame+1])
         self.gt_velo.append(seq.data["velocity"][start_frame:end_frame+1])
+        acc_bias = seq.data.get("initial_acc_bias")
+        gyro_bias = seq.data.get("initial_gyro_bias")
+        if (acc_bias is None) != (gyro_bias is None):
+            raise ValueError(
+                "A sequence must provide both initial_acc_bias and "
+                "initial_gyro_bias, or neither."
+            )
+        self.initial_acc_bias.append(acc_bias)
+        self.initial_gyro_bias.append(gyro_bias)
 
     def construct_index_map(self, conf, data_root, data_name, seq_id):
         seq = self.DataClass[conf.name](data_root, data_name, intepolate = True, **self.conf)
@@ -232,6 +243,10 @@ class SeqeuncesDataset(Data.Dataset):
             'gt_rot': self.gt_ori[seq_id][frame_id+1 : end_frame_id+1],
             'gt_vel': self.gt_velo[seq_id][frame_id+1 : end_frame_id+1],
         }
+
+        if self.initial_acc_bias[seq_id] is not None:
+            data['initial_acc_bias'] = self.initial_acc_bias[seq_id]
+            data['initial_gyro_bias'] = self.initial_gyro_bias[seq_id]
 
         return {**data, **init_state, **label}
 

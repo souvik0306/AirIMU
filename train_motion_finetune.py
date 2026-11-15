@@ -11,6 +11,7 @@ from pyhocon import HOCONConverter as conf_convert
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from datasets import SeqeuncesDataset, collate_fcs
+from datasets.initial_sensor_bias import resolve_initial_sensor_bias
 from model import net_dict
 from utils import move_to
 from train import (
@@ -20,6 +21,7 @@ from train import (
     save_best_ckpt,
     save_ckpt,
     write_wandb,
+    save_wandb_run_metadata,
     upload_best_ckpt_artifact,
 )
 
@@ -31,8 +33,13 @@ def torch_load(path, device):
         return torch.load(path, map_location=device)
 
 
-def load_pretrained_model(network, ckpt_path, device, strict=True):
+def load_pretrained_model(network, ckpt_path, device, strict=True, required=False):
     if ckpt_path is None or str(ckpt_path).lower() in ("", "none", "false"):
+        if required:
+            raise ValueError(
+                "Stage 2 requires the best Stage 1 checkpoint. Pass it with "
+                "--pretrained_ckpt."
+            )
         print("No pretrained checkpoint configured; training from scratch.")
         return False
     if not os.path.isfile(ckpt_path):
@@ -81,7 +88,7 @@ def configure_stage1_covariance(
 
 
 def resolve_stage1_vel_ref(conf, pretrained_override=None):
-    """Resolve Stage 2's velocity guard from Stage 1's best checkpoint."""
+    """Record the corrected-velocity metric from Stage 1's best checkpoint."""
     configured_ref = conf.train.get("stage1_vel_ref", "auto")
     if str(configured_ref).strip().lower() != "auto":
         stage1_vel_ref = float(configured_ref)
@@ -138,6 +145,128 @@ NLL_KEYS = ("rot_nll", "vel_nll", "pos_nll", "cov_nll")
 def extract_nll_metrics(test_loss):
     """Reuse NLL metrics already accumulated by the normal test pass."""
     return {key: test_loss[key] for key in NLL_KEYS}
+
+
+def configure_stage2_windows(conf):
+    """Apply and validate the Stage 2 raw-IMU integration horizon."""
+    rate_hz = float(conf.train.get("imu_rate_hz", 200))
+    duration_s = float(conf.train.get("integration_window_seconds", 1.0))
+    if rate_hz <= 0:
+        raise ValueError(f"train.imu_rate_hz must be positive, got {rate_hz}.")
+    if not 1.0 <= duration_s <= 2.0:
+        raise ValueError(
+            "Stage 2 integration_window_seconds must be in [1.0, 2.0]; "
+            f"got {duration_s}."
+        )
+
+    samples_float = rate_hz * duration_s
+    samples = int(round(samples_float))
+    if not np.isclose(samples_float, samples):
+        raise ValueError(
+            "imu_rate_hz * integration_window_seconds must be an integer "
+            f"sample count; got {samples_float}."
+        )
+
+    for split in ("train", "test", "eval"):
+        for data_conf in conf.dataset[split].data_list:
+            data_conf["window_size"] = samples
+    conf.train["integration_window_samples"] = samples
+    print(
+        "Stage 2 raw-IMU window: %.3f s at %.3f Hz = %d samples"
+        % (duration_s, rate_hz, samples)
+    )
+    return samples
+
+
+def configure_stage2_initial_biases(conf):
+    """Validate and expose one fixed initial bias for every Stage 2 flight."""
+    enabled = bool(conf.train.get("use_initial_sensor_bias", False))
+    if not enabled:
+        print("Stage 2 initial sensor bias subtraction is disabled.")
+        return 0
+
+    bias_root = conf.train.get("initial_sensor_bias_root")
+    if not bias_root:
+        raise ValueError(
+            "Stage 2 use_initial_sensor_bias=true requires "
+            "train.initial_sensor_bias_root."
+        )
+    bias_root = os.path.abspath(str(bias_root))
+    if not os.path.isdir(bias_root):
+        raise FileNotFoundError(
+            f"Initial sensor bias directory was not found: {bias_root}"
+        )
+    conf.train["initial_sensor_bias_root"] = bias_root
+
+    total = 0
+    unique_sequences = set()
+    split_counts = {}
+    for split in ("train", "test", "eval"):
+        split_conf = conf.dataset[split]
+        # ConfigTree attribute assignment does not reliably add a new mapping
+        # key. SeqeuncesDataset expands the split mapping into TLab, so this
+        # must be an actual key for the loader to receive the bias root.
+        split_conf["initial_sensor_bias_root"] = bias_root
+        split_count = 0
+        for data_conf in split_conf.data_list:
+            for data_name in data_conf.data_drive:
+                resolve_initial_sensor_bias(
+                    bias_root, data_conf.data_root, data_name
+                )
+                sequence = (
+                    os.path.basename(os.path.normpath(str(data_conf.data_root))),
+                    str(data_name),
+                )
+                if sequence in unique_sequences:
+                    raise ValueError(
+                        "A Stage 2 trajectory appears in more than one split: "
+                        f"{sequence[0]}/{sequence[1]}"
+                    )
+                unique_sequences.add(sequence)
+                split_count += 1
+                total += 1
+        split_counts[split] = split_count
+
+    print(
+        "Stage 2 initial sensor biases: resolved %d flights from %s "
+        "(train=%d, test=%d, eval=%d)"
+        % (
+            total,
+            bias_root,
+            split_counts["train"],
+            split_counts["test"],
+            split_counts["eval"],
+        )
+    )
+    return total
+
+
+def validate_stage2_dataset_initial_biases(dataset, split):
+    """Fail before model execution if a Stage 2 sequence lost its bias pair."""
+    missing = []
+    incomplete = []
+    for sequence_id, (acc_bias, gyro_bias) in enumerate(
+        zip(dataset.initial_acc_bias, dataset.initial_gyro_bias)
+    ):
+        if acc_bias is None and gyro_bias is None:
+            missing.append(sequence_id)
+        elif acc_bias is None or gyro_bias is None:
+            incomplete.append(sequence_id)
+
+    if incomplete:
+        raise RuntimeError(
+            f"Stage 2 {split} dataset has incomplete initial sensor bias pairs "
+            f"for sequence indices {incomplete}."
+        )
+    if missing:
+        raise RuntimeError(
+            f"Stage 2 {split} dataset is missing initial sensor biases for "
+            f"sequence indices {missing}."
+        )
+    print(
+        f"Stage 2 {split} dataset: attached initial sensor biases to "
+        f"{len(dataset.initial_acc_bias)} sequences."
+    )
 
 
 def build_loader(
@@ -277,6 +406,10 @@ if __name__ == "__main__":
         conf.train.stage1_vel_ref = resolve_stage1_vel_ref(
             conf, pretrained_override=args.pretrained_ckpt
         )
+        configure_stage2_windows(conf)
+        configure_stage2_initial_biases(conf)
+        if not conf.train.propcov:
+            raise ValueError("Stage 2 requires train.propcov=true.")
     else:
         # Stage 1 starts with covariance disabled at runtime, but its shared
         # preintegrator must be constructed with covariance support so epoch 9
@@ -299,6 +432,10 @@ if __name__ == "__main__":
     train_dataset = SeqeuncesDataset(data_set_config=conf.dataset.train)
     test_dataset = SeqeuncesDataset(data_set_config=conf.dataset.test)
     eval_dataset = SeqeuncesDataset(data_set_config=conf.dataset.eval)
+    if is_stage2 and conf.train.get("use_initial_sensor_bias", False):
+        validate_stage2_dataset_initial_biases(train_dataset, "train")
+        validate_stage2_dataset_initial_biases(test_dataset, "test")
+        validate_stage2_dataset_initial_biases(eval_dataset, "eval")
 
     if 'collate' in conf.dataset.keys():
         collate_fn_train = collate_fcs[conf.dataset.collate]
@@ -350,13 +487,27 @@ if __name__ == "__main__":
             name=run_name,
         )
         wandb.config.update({"data_drives": collect_data_drives(conf.dataset)})
+        save_wandb_run_metadata(conf.general.exp_dir)
 
     network = net_dict[conf.train.network](conf.train).to(
         device=args.device, dtype=train_dataset.get_dtype()
     )
     base_cov_weight = float(conf.train.get("cov_weight", 0.0))
+    if is_stage2:
+        if not hasattr(network, "configure_stage2_training"):
+            raise TypeError(
+                f"{type(network).__name__} does not define Stage 2 uncertainty heads."
+            )
+        trainable_parameters = network.configure_stage2_training()
+        trainable_names = [
+            name for name, parameter in network.named_parameters()
+            if parameter.requires_grad
+        ]
+        print("Stage 2 trainable parameters: " + ", ".join(trainable_names))
+    else:
+        trainable_parameters = list(network.parameters())
     optimizer = torch.optim.Adam(
-        network.parameters(), lr=conf.train.lr, weight_decay=conf.train.weight_decay
+        trainable_parameters, lr=conf.train.lr, weight_decay=conf.train.weight_decay
     )
     scheduler = ReduceLROnPlateau(
         optimizer,
@@ -376,7 +527,6 @@ if __name__ == "__main__":
     covariance_heads_initialized = True
     if is_stage2:
         best_loss = float("inf")
-        vel_limit = conf.train.stage1_vel_ref * (1.0 + conf.train.vel_degradation_limit)
     else:
         rot_limit = conf.train.rot_limit if "rot_limit" in conf.train else float("inf")
 
@@ -408,6 +558,7 @@ if __name__ == "__main__":
                 pretrained_ckpt,
                 args.device,
                 strict=not args.non_strict_pretrained,
+                required=is_stage2,
             )
             if is_stage2:
                 # The pretrained cov heads are dead weight from a propcov=False
@@ -422,6 +573,7 @@ if __name__ == "__main__":
             pretrained_ckpt,
             args.device,
             strict=not args.non_strict_pretrained,
+            required=is_stage2,
         )
         if is_stage2:
             network.reset_cov_heads()
@@ -449,10 +601,14 @@ if __name__ == "__main__":
 
     if is_stage2:
         initial_nll = extract_nll_metrics(initial_test_loss)
-        initial_vel_rmse = initial_eval_state['loss']['vel'].mean().item()
-        initial_loss = initial_test_loss['loss']
-        if initial_vel_rmse <= vel_limit and initial_loss < best_loss:
-            best_loss = initial_loss
+        initial_vel_rmse = (
+            initial_eval_state['loss']['vel'].mean().item()
+            if initial_eval_state is not None
+            else initial_test_loss['corrected_vel_rmse']
+        )
+        initial_cov_nll = initial_nll["cov_nll"]
+        if initial_cov_nll < best_loss:
+            best_loss = initial_cov_nll
             save_best_ckpt(
                 network,
                 optimizer,
@@ -460,15 +616,17 @@ if __name__ == "__main__":
                 epoch - 1,
                 best_loss,
                 conf,
+                metric_name="raw_cov_nll",
+                extra_state={"best_cov_nll": best_loss},
             )
             print(
-                "Saved eligible Stage 2 baseline as best model: "
-                "vel_rmse = %.6f, loss = %.6f, vel_nll = %.6f"
-                % (initial_vel_rmse, initial_loss, initial_nll["vel_nll"])
+                "Saved Stage 2 baseline as best model: "
+                "corrected_vel_rmse = %.6f, raw_cov_nll = %.6f"
+                % (initial_vel_rmse, initial_cov_nll)
             )
         print(
-            "Stage 2 baseline: vel_rmse = %.6f, loss = %.6f, vel_nll = %.6f"
-            % (initial_vel_rmse, initial_loss, initial_nll["vel_nll"])
+            "Stage 2 baseline: corrected_vel_rmse = %.6f, raw_cov_nll = %.6f"
+            % (initial_vel_rmse, initial_cov_nll)
         )
         if args.log:
             write_wandb("monitor/vel_rmse", initial_vel_rmse, initial_step)
@@ -512,24 +670,38 @@ if __name__ == "__main__":
 
         if is_stage2:
             nll_metrics = extract_nll_metrics(test_loss)
-            val_vel_rmse = eval_state['loss']['vel'].mean().item()
+            val_vel_rmse = (
+                eval_state['loss']['vel'].mean().item()
+                if eval_state is not None
+                else test_loss['corrected_vel_rmse']
+            )
             vel_nll = nll_metrics["vel_nll"]
             cov_nll = nll_metrics["cov_nll"]
             if args.log:
                 write_wandb("monitor/vel_rmse", val_vel_rmse, log_step)
                 write_wandb("nll", nll_metrics, log_step)
-            scheduler.step(test_loss['loss'])
-            if test_loss['loss'] < best_loss and val_vel_rmse <= vel_limit:
-                best_loss = test_loss['loss']
+            scheduler.step(cov_nll)
+            if cov_nll < best_loss:
+                best_loss = cov_nll
                 save_best = True
                 print(
                     "Saving best Stage 2 model: "
-                    "vel_rmse = %.6f, loss = %.6f, vel_nll = %.6f, cov_nll = %.6f"
-                    % (val_vel_rmse, best_loss, vel_nll, cov_nll)
+                    "corrected_vel_rmse = %.6f, vel_nll = %.6f, raw_cov_nll = %.6f"
+                    % (val_vel_rmse, vel_nll, cov_nll)
                 )
             else:
                 save_best = False
-            save_ckpt(network, optimizer, scheduler, epoch_i, best_loss, conf, save_best=save_best)
+            if save_best:
+                save_best_ckpt(
+                    network, optimizer, scheduler, epoch_i, best_loss, conf,
+                    metric_name="raw_cov_nll",
+                    extra_state={"best_cov_nll": best_loss},
+                )
+            save_ckpt(
+                network, optimizer, scheduler, epoch_i, best_loss, conf,
+                save_best=False,
+                extra_state={"best_cov_nll": best_loss},
+            )
         else:
             if eval_state is not None:
                 val_vel_rmse = eval_state['loss']['vel'].mean().item()
@@ -577,9 +749,8 @@ if __name__ == "__main__":
                         checkpoint_name="best_covariance_model.ckpt",
                         metric_name="corrected_cov_nll",
                         extra_state={
-                            # Stage 2's velocity guard still needs the best
-                            # corrected-trajectory reference even when this
-                            # calibration-selected checkpoint is loaded.
+                            # Preserve corrected-trajectory provenance even
+                            # when this calibration-selected checkpoint loads.
                             "best_loss": best_vel_rmse,
                             "best_corrected_vel_rmse": best_vel_rmse,
                             "best_cov_nll": best_cov_nll,

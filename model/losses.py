@@ -1,5 +1,5 @@
 import torch
-from .loss_func import diag_ln_cov_loss, loss_fc_list
+from .loss_func import loss_fc_list
 from utils import report_hasNan
 
 
@@ -134,20 +134,12 @@ def get_loss(inte_state, data, confs):
             cov_vel = inte_state['vel']
             cov_pos = inte_state['pos']
 
-        if is_stage2:
-            # Preserve the existing raw-covariance baseline until Stage 2 is
-            # revised separately.
-            _, cov_rot_dist = loss_(
-                rotloss_fc, cov_rot, data['gt_rot'],
-                sampling=confs.sampling, dtype='rot'
-            )
-        else:
-            # The preintegrator expresses rotation uncertainty in the local
-            # tangent frame, so use pred^-1 * target for the covariance
-            # residual. The Stage 1 rotation Huber loss remains unchanged.
-            cov_rot_dist = covariance_rotation_residual(
-                cov_rot, data['gt_rot'], sampling=confs.sampling
-            )
+        # The preintegrator expresses rotation uncertainty in the local
+        # tangent frame, so use pred^-1 * target for the covariance residual.
+        # In Stage 2, cov_rot is the raw-IMU rotation and data is Vicon GT.
+        cov_rot_dist = covariance_rotation_residual(
+            cov_rot, data['gt_rot'], sampling=confs.sampling
+        )
         _, cov_vel_dist = loss_(
             loss_fc, cov_vel, data['gt_vel'], sampling=confs.sampling
         )
@@ -168,25 +160,19 @@ def get_loss(inte_state, data, confs):
         nll_vel_dist = cov_vel_dist if confs.get('covaug', False) else cov_vel_dist.detach()
         nll_pos_dist = cov_pos_dist if confs.get('covaug', False) else cov_pos_dist.detach()
 
-        if is_stage2:
-            cov_rot_loss = diag_ln_cov_loss(nll_rot_dist, cov_diag[..., :3])
-            cov_vel_loss = diag_ln_cov_loss(nll_vel_dist, cov_diag[..., 3:6])
-            cov_pos_loss = diag_ln_cov_loss(nll_pos_dist, cov_diag[..., 6:9])
-            combined_cov_nll = cov_rot_loss + cov_vel_loss + cov_pos_loss
-        else:
-            # Component NLLs are retained for interpretable calibration
-            # logging. Each keeps its 3x3 correlations, while the optimized
-            # NLL uses the complete 9x9 covariance and its cross-correlations.
-            cov_rot_loss = cholesky_nll(nll_rot_dist, rot_cov)
-            cov_vel_loss = cholesky_nll(nll_vel_dist, vel_cov)
-            cov_pos_loss = cholesky_nll(nll_pos_dist, pos_cov)
+        # Component NLLs are retained for interpretable calibration logging.
+        # The optimized NLL uses the complete 9x9 covariance, including the
+        # cross-correlations created by raw IMU preintegration.
+        cov_rot_loss = cholesky_nll(nll_rot_dist, rot_cov)
+        cov_vel_loss = cholesky_nll(nll_vel_dist, vel_cov)
+        cov_pos_loss = cholesky_nll(nll_pos_dist, pos_cov)
 
-            # Use one consistent truth-minus-estimate convention for the full
-            # residual. (The componentwise quadratic terms are sign invariant.)
-            full_dist = torch.cat(
-                [nll_rot_dist, -nll_vel_dist, -nll_pos_dist], dim=-1
-            )
-            combined_cov_nll = cholesky_nll(full_dist, inte_state['cov'])
+        # Match the covariance tangent convention with one consistent
+        # truth-minus-estimate residual across rotation, velocity and position.
+        full_dist = torch.cat(
+            [nll_rot_dist, -nll_vel_dist, -nll_pos_dist], dim=-1
+        )
+        combined_cov_nll = cholesky_nll(full_dist, inte_state['cov'])
 
         cov_losses['rot_nll'] = cov_rot_loss.detach()
         cov_losses['vel_nll'] = cov_vel_loss.detach()
@@ -223,8 +209,8 @@ def get_loss(inte_state, data, confs):
         # independent of the long-horizon integrated NLL, so the model can't
         # settle for a merely "legitimate" but inflated covariance driven by
         # multi-step drift rather than sensor noise.
-        # Normalized by the desired target (not the hard ceiling) and split
-        # per-sensor since drone performance is more gyro-sensitive.
+        # Normalized by the desired target and split per sensor. Stage 2 keeps
+        # these optional terms disabled so covariance NLL sets the scale.
         cov_losses['acc_cov_mean'] = inte_state['acc_cov'].mean().detach()
         cov_losses['gyro_cov_mean'] = inte_state['gyro_cov'].mean().detach()
         acc_cov_reg_weight = confs.get('acc_cov_reg_weight', confs.get('cov_reg_weight', 0.0))
@@ -237,23 +223,16 @@ def get_loss(inte_state, data, confs):
             cov_losses['acc_cov_reg'] = acc_cov_reg_loss.detach()
             cov_losses['gyro_cov_reg'] = gyro_cov_reg_loss.detach()
 
-        if is_stage2:
-            # Preserve the existing Stage 2 component weighting until the
-            # separate raw-covariance adapter is implemented.
-            rot_cov_weight = confs.get('rot_cov_weight', confs.cov_weight)
-            vel_cov_weight = confs.get('vel_cov_weight', confs.cov_weight)
-            pos_cov_weight = confs.get('pos_cov_weight', confs.cov_weight)
-
-    loss += (confs.pos_weight * pos_loss + confs.rot_weight * rot_loss + confs.vel_weight * vel_loss)
+    trajectory_loss = (
+        confs.pos_weight * pos_loss
+        + confs.rot_weight * rot_loss
+        + confs.vel_weight * vel_loss
+    )
+    # Stage 2 is an uncertainty-only fit. Corrected trajectory losses remain
+    # metrics, but must not be part of the optimized objective.
+    loss += 0.0 if (confs.get('stage', 1) == 2 and confs.propcov) else trajectory_loss
     if confs.propcov:
-        if is_stage2:
-            loss += (
-                rot_cov_weight * cov_rot_loss
-                + vel_cov_weight * cov_vel_loss
-                + pos_cov_weight * cov_pos_loss
-            )
-        else:
-            loss += confs.cov_weight * combined_cov_nll
+        loss += confs.cov_weight * combined_cov_nll
         if acc_cov_reg_weight > 0:
             loss += acc_cov_reg_weight * acc_cov_reg_loss
         if gyro_cov_reg_weight > 0:

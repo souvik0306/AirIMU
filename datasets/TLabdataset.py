@@ -7,6 +7,7 @@ import torch
 from scipy.spatial.transform import Rotation
 
 from .dataset import Sequence
+from .initial_sensor_bias import resolve_initial_sensor_bias
 
 
 class TLab(Sequence):
@@ -23,6 +24,7 @@ class TLab(Sequence):
         imu_file="imu.csv",
         gt_file="data.csv",
         align_tolerance=1e-4,
+        initial_sensor_bias_root=None,
         **kwargs,
     ):
         super(TLab, self).__init__()
@@ -37,6 +39,8 @@ class TLab(Sequence):
         data_path = os.path.join(data_root, data_name)
         self.load_imu(data_path)
         self.load_gt(data_path)
+        if initial_sensor_bias_root:
+            self.load_initial_sensor_bias(initial_sensor_bias_root)
         self.align_all_to_euroc_frame()
         self.remove_initial_position_offset()
         self.use_aligned_ground_truth()
@@ -47,6 +51,13 @@ class TLab(Sequence):
         self.data["mask"] = torch.ones(self.data["time"].shape[0], dtype=torch.bool)
         self.data["gyro"] = torch.tensor(self.data["gyro"], dtype=torch.double)
         self.data["acc"] = torch.tensor(self.data["acc"], dtype=torch.double)
+        if "initial_acc_bias" in self.data:
+            self.data["initial_acc_bias"] = torch.tensor(
+                self.data["initial_acc_bias"], dtype=torch.double
+            )
+            self.data["initial_gyro_bias"] = torch.tensor(
+                self.data["initial_gyro_bias"], dtype=torch.double
+            )
 
         self.set_orientation(rot_path, data_name, rot_type)
         self.update_coordinate(coordinate, mode)
@@ -106,6 +117,15 @@ class TLab(Sequence):
             [gt_data["vel_x"], gt_data["vel_y"], gt_data["vel_z"]]
         )
 
+    def load_initial_sensor_bias(self, bias_root):
+        """Attach the one fixed EKF2 bias associated with this flight."""
+        bias = resolve_initial_sensor_bias(
+            bias_root, self.data_root, self.data_name
+        )
+        self.data["initial_acc_bias"] = np.asarray(bias.acc, dtype=float)
+        self.data["initial_gyro_bias"] = np.asarray(bias.gyro, dtype=float)
+        self.initial_sensor_bias_source = bias.source_file
+
     def align_imu_to_euroc_frame(self):
         """Map TLab IMU vectors to EuRoC axes before model consumption."""
         self.data["acc"] = np.column_stack(
@@ -118,6 +138,15 @@ class TLab(Sequence):
                 self.data["gyro"][:, 0],
             ]
         )
+        if "initial_acc_bias" in self.data:
+            acc_bias = self.data["initial_acc_bias"]
+            gyro_bias = self.data["initial_gyro_bias"]
+            self.data["initial_acc_bias"] = np.asarray(
+                [acc_bias[2], -acc_bias[1], acc_bias[0]]
+            )
+            self.data["initial_gyro_bias"] = np.asarray(
+                [gyro_bias[2], -gyro_bias[1], gyro_bias[0]]
+            )
 
     def align_orientation_to_euroc_frame(self):
         """Remap GT orientation from TLab frame to EuRoC frame via rotation matrices."""

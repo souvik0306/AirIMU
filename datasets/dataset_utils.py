@@ -14,7 +14,7 @@ def imu_seq_collate(data):
 
     dt = torch.stack([d['dt'] for d in data])
 
-    return {
+    batch = {
         'dt': dt,
         'acc': acc,
         'gyro': gyro,
@@ -27,6 +27,19 @@ def imu_seq_collate(data):
         'init_vel': init_vel,
         'init_rot': init_rot,
     }
+    bias_present = ['initial_acc_bias' in d for d in data]
+    if any(bias_present):
+        if not all(bias_present):
+            raise ValueError(
+                "Cannot collate a mixture of biased and unbiased sequences."
+            )
+        batch['initial_acc_bias'] = torch.stack(
+            [d['initial_acc_bias'] for d in data]
+        )
+        batch['initial_gyro_bias'] = torch.stack(
+            [d['initial_gyro_bias'] for d in data]
+        )
+    return batch
 
 def custom_collate(data):
     dt = torch.stack([d['dt'] for d in data])
@@ -42,7 +55,21 @@ def custom_collate(data):
     init_rot = torch.stack([d['init_rot'] for d in data])
     init_vel = torch.stack([d['init_vel'] for d in data])
 
-    return  {'dt': dt, 'acc': acc, 'gyro': gyro, 'rot':rot,}, \
+    input_data = {'dt': dt, 'acc': acc, 'gyro': gyro, 'rot': rot}
+    bias_present = ['initial_acc_bias' in d for d in data]
+    if any(bias_present):
+        if not all(bias_present):
+            raise ValueError(
+                "Cannot collate a mixture of biased and unbiased sequences."
+            )
+        input_data['initial_acc_bias'] = torch.stack(
+            [d['initial_acc_bias'] for d in data]
+        )
+        input_data['initial_gyro_bias'] = torch.stack(
+            [d['initial_gyro_bias'] for d in data]
+        )
+
+    return  input_data, \
             {'pos': init_pos, 'vel': init_vel, 'rot': init_rot,}, \
             {'gt_pos': gt_pos, 'gt_vel': gt_vel, 'gt_rot': gt_rot, }
 
