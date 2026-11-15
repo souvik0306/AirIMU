@@ -1,0 +1,35 @@
+#PBS -S /bin/bash
+#PBS -q auto_free
+#PBS -j oe
+#PBS -N airimu_stage2_eval
+#PBS -l walltime=04:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+
+# Evaluate the saved Stage 2 checkpoint without repeating training.
+# Override STAGE2_RUN_ROOT, STAGE2_EVAL_OUTPUT, or EKF_EVAL_DEVICE with qsub -v.
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+module load apptainer/1.4.1
+
+image=/app1/common/singularity-img/vanda/pytorch_2.5_cuda_12.4_unsloth.sif
+run_root=${STAGE2_RUN_ROOT:-experiments/20261115_184615_SGT_job1558928/joint_ekf}
+output=${STAGE2_EVAL_OUTPUT:-$run_root/evaluation_stage2}
+device=${EKF_EVAL_DEVICE:-cuda:0}
+config=${EKF_CONFIG:-configs/exp/TLab/4th_Nov_Scratch_stage2.conf}
+checkpoint="$run_root/airimu_stage2/ckpt/best_model.ckpt"
+[[ -f "$checkpoint" ]] || { echo "Missing checkpoint: $checkpoint" >&2; exit 2; }
+
+echo "Stage 2 checkpoint: $checkpoint"
+echo "Evaluation output: $output"
+echo "Compute node: $(hostname); device: $device"
+runner=(-m evaluation.evaluate_eskf)
+if [[ -f "$output/source/run_evaluation.py" ]]; then
+    runner=("$output/source/run_evaluation.py")
+    echo "Using preserved baseline source: $output/source"
+fi
+apptainer exec --nv -e "$image" python3 -u "${runner[@]}" \
+    --config "$config" --ckpt "$checkpoint" \
+    --dataset-config "${EKF_DATASET_CONFIG:-configs/datasets/TLab/tlab_body.conf}" \
+    --sensor-metadata-root "${SENSOR_METADATA_ROOT:-initial_sensor_biases}" \
+    --output "$output" --split test --device "$device" --cpu-threads 1
+echo "Stage 2 evaluation finished: $output"

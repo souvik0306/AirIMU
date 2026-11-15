@@ -16,3 +16,4 @@ experiments/*
 AirIMU_EuRoC/*
 .airimu-tools/*
 .venv/*
+tests/

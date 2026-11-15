@@ -12,6 +12,8 @@ from ekf import (AirIMUESKF, DifferentiableESKF, EKFState, ViconEvent,
                  horizontal_velocity_loss, velocity_evaluation_mask)
 from ekf.eskf import (quaternion_exp, quaternion_matrix, quaternion_multiply,
                       quaternion_yaw, right_jacobian)
+from ekf.experiment import CovarianceStatistics, covariance_statistics
+from ekf.parallel import replay_velocity
 
 
 torch.set_num_threads(1)
@@ -302,6 +304,53 @@ class SequenceTests(unittest.TestCase):
                                   torch.zeros_like(variance.grad[times >= 1.]), atol=0, rtol=0)
         self.assertEqual(result["covariance"].shape, (5201, 15, 15))
 
+    def test_velocity_only_replay_preserves_states_and_complete_gradients(self):
+        variance = torch.full((len(self.time), 6), .003, dtype=DTYPE, requires_grad=True)
+        full = self.run_filter(variance)
+        fast = self.ekf.run_sequence(self.imu, self.time, variance, self.events, 1.,
+                                    self.state, self.P, return_covariance=False)
+        self.assertNotIn("covariance", fast)
+        for key in fast:
+            torch.testing.assert_close(fast[key], full[key], atol=0, rtol=0)
+        mask = self.time >= 1.2
+        gt = torch.zeros(len(self.time), 3, dtype=DTYPE)
+        a, = torch.autograd.grad(horizontal_velocity_loss(full["velocity"], gt, mask), variance)
+        b, = torch.autograd.grad(horizontal_velocity_loss(fast["velocity"], gt, mask), variance)
+        torch.testing.assert_close(a, b, atol=1e-15, rtol=1e-12)
+        self.assertGreater(float(b[self.time < 1.].norm()), 0.)
+        torch.testing.assert_close(b[self.time >= 1.], torch.zeros_like(b[self.time >= 1.]), atol=0, rtol=0)
+
+    def test_batched_quaternion_aiding_matches_public_update_and_gradient(self):
+        quaternion = quaternion_exp(torch.tensor([.2, -.1, .3], dtype=DTYPE)).requires_grad_()
+        event = ViconEvent(0., "yaw", quaternion)
+        variance = torch.full((len(self.time), 6), .001, dtype=DTYPE)
+        result = self.run_filter(variance, [event])
+        expected, P = self.ekf.update_vicon(self.state, self.P, quaternion, "yaw")
+        torch.testing.assert_close(result["quaternion"][0], expected.quaternion, atol=0, rtol=0)
+        torch.testing.assert_close(result["covariance"][0], P, atol=0, rtol=0)
+        a, = torch.autograd.grad(result["quaternion"][0].sum(), quaternion, retain_graph=True)
+        b, = torch.autograd.grad(expected.quaternion.sum(), quaternion)
+        torch.testing.assert_close(a, b, atol=1e-14, rtol=1e-12)
+
+    def test_sequence_rejects_nonfinite_and_zero_quaternion_observations(self):
+        variance = torch.full((len(self.time), 6), .001, dtype=DTYPE)
+        for observation in (torch.zeros(4), torch.tensor([float("nan")])):
+            with self.assertRaises(ValueError):
+                self.run_filter(variance, [ViconEvent(.1, "yaw", observation)])
+
+    def test_covariance_statistics_are_per_axis_and_sample_weighted(self):
+        a = torch.arange(6, dtype=DTYPE)[None]
+        b = torch.arange(12, dtype=DTYPE).reshape(2, 6) + 10
+        aggregate = CovarianceStatistics()
+        aggregate.update(covariance_statistics(a))
+        aggregate.update(covariance_statistics(b))
+        expected = covariance_statistics(torch.cat((a, b)))
+        actual = aggregate.summary()
+        self.assertEqual(actual["samples"], 3)
+        for name in ("acc_cov", "gyro_cov"):
+            for stat in ("mean", "min", "max"):
+                torch.testing.assert_close(torch.tensor(actual[name][stat]), torch.tensor(expected[name][stat]))
+
     def test_autograd_agrees_with_finite_difference(self):
         variance = torch.full((len(self.time), 6), .005, dtype=DTYPE, requires_grad=True)
         gradient, = torch.autograd.grad(self.objective(variance), variance)
@@ -381,6 +430,87 @@ class SequenceTests(unittest.TestCase):
         optimizer.step()
         for name, value in frozen_before.items():
             torch.testing.assert_close(network.state_dict()[name], value, atol=0, rtol=0)
+
+    def make_wrapper(self):
+        from model.code import CodeNet
+        from pyhocon import ConfigFactory
+        conf = ConfigFactory.from_dict(dict(network="codenet", propcov=True, gtrot=False))
+        with contextlib.redirect_stdout(io.StringIO()):
+            network = CodeNet(conf).float()
+        with torch.no_grad():
+            network.acccov_decoder[-1].weight.normal_(std=.01)
+            network.gyrocov_decoder[-1].weight.normal_(std=.01)
+            network.acc_bias_gain.weight.normal_(std=.1)
+            network.gyro_bias_gain.weight.normal_(std=.1)
+        return AirIMUESKF(network, self.ekf)
+
+    def test_gather_covariance_matches_original_inference_and_gradients(self):
+        wrapper = self.make_wrapper()
+        parameters = [p for p in wrapper.network.parameters() if p.requires_grad]
+        for samples in (1, 4, 5, 6, 9, 13, 14, 15, 55, 200):
+            imu = self.imu[0].repeat(samples, 1)
+            context = wrapper.network.interval
+            data = {name: torch.cat((values[:1].expand(context, -1), values), 0)[None].float()
+                    for name, values in (("acc", imu[:, :3]), ("gyro", imu[:, 3:]))}
+            with contextlib.redirect_stdout(io.StringIO()):
+                output = wrapper.network.inference(data)["cov_state"]
+            expected = torch.cat((output["acc_cov"][0], output["gyro_cov"][0]), -1).double()
+            actual = wrapper.predict_variance(imu[:, :3], imu[:, 3:])
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+            weights = torch.linspace(.1, 1., samples*6, dtype=DTYPE).reshape(samples, 6)
+            a = torch.autograd.grad((expected*weights).sum(), parameters)
+            b = torch.autograd.grad((actual*weights).sum(), parameters)
+            for left, right in zip(a, b):
+                torch.testing.assert_close(left, right, atol=2e-7, rtol=2e-5)
+
+    def test_batched_head_vjp_matches_direct_mean_full_flight_gradient(self):
+        wrapper = self.make_wrapper()
+        parameters = [p for p in wrapper.network.parameters() if p.requires_grad]
+        flights = []
+        for samples, scale in ((55, 1.), (58, 1.03)):
+            imu = self.imu[0].repeat(samples, 1)*scale
+            flights.append(dict(raw_acceleration=imu[:, :3], raw_gyroscope=imu[:, 3:],
+                imu_time=torch.arange(samples, dtype=DTYPE)*.5, vicon_events=self.events,
+                cutoff_timestamp=1., initial_state=self.state, initial_covariance=self.P,
+                vicon_velocity_gt=torch.zeros(samples, 3, dtype=DTYPE)))
+        direct = [wrapper(**flight, return_covariance=False)["loss"] for flight in flights]
+        expected = torch.autograd.grad(torch.stack(direct).mean(), parameters)
+        features = [wrapper.extract_features(flight["raw_acceleration"], flight["raw_gyroscope"])
+                    for flight in flights]
+        self.assertTrue(all(not value.requires_grad for item in features for value in item.values()
+                            if torch.is_tensor(value)))
+        variances = wrapper.predict_variance_batch(features)
+        outputs = [replay_velocity(self.ekf, flight, variance, backward=True)
+                   for flight, variance in zip(flights, variances)]
+        actual = torch.autograd.grad(variances, parameters,
+                                    grad_outputs=[row["gradient"]/2 for row in outputs])
+        for row, loss in zip(outputs, direct):
+            # Batching changes Float32 GEMM reduction order in the heads.
+            torch.testing.assert_close(torch.tensor(row["loss"], dtype=DTYPE), loss.detach(),
+                                       atol=1e-6, rtol=1e-7)
+        for left, right in zip(actual, expected):
+            torch.testing.assert_close(left, right, atol=3e-6, rtol=5e-4)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
+    def test_cuda_heads_receive_cpu_replay_gradient(self):
+        wrapper = self.make_wrapper()
+        wrapper.network.to("cuda")
+        samples = 55
+        imu = self.imu[0].repeat(samples, 1)
+        flight = dict(raw_acceleration=imu[:, :3], raw_gyroscope=imu[:, 3:],
+            imu_time=torch.arange(samples, dtype=DTYPE)*.5, vicon_events=self.events,
+            cutoff_timestamp=1., initial_state=self.state, initial_covariance=self.P,
+            vicon_velocity_gt=torch.zeros(samples, 3, dtype=DTYPE))
+        parameters = [p for p in wrapper.network.parameters() if p.requires_grad]
+        direct = wrapper(**flight, return_covariance=False)
+        expected = torch.autograd.grad(direct["loss"], parameters)
+        variance = wrapper.predict_variance(imu[:, :3], imu[:, 3:])
+        self.assertEqual(variance.device.type, "cpu")
+        output = replay_velocity(self.ekf, flight, variance, backward=True)
+        actual = torch.autograd.grad(variance, parameters, grad_outputs=output["gradient"])
+        for left, right in zip(actual, expected):
+            self.assertEqual(left.device.type, "cuda")
+            torch.testing.assert_close(left, right, atol=1e-7, rtol=1e-5)
 
 
 if __name__ == "__main__":

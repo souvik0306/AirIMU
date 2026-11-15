@@ -1,15 +1,21 @@
 """Input preparation checks for the standard TLab dataset layout."""
 
 import csv
+import contextlib
+import copy
+import io
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from time import perf_counter
 
 import torch
 
 from ekf import DifferentiableESKF
 from ekf.data import (apply_sensor_metadata, prepare_flight, read_dataset_flights,
                       read_sensor_metadata_table)
+from ekf.runner import FlightTrainer
 
 
 def write_csv(path, header, rows):
@@ -115,6 +121,49 @@ class FlightDataTests(unittest.TestCase):
         ))
         with self.assertRaises(ValueError):
             read_dataset_flights(duplicate)
+
+    def test_parallel_trainer_matches_serial_batch_and_reuses_frozen_features(self):
+        from model.code import CodeNet
+        from ekf import AirIMUESKF
+        from pyhocon import ConfigFactory
+        records = []
+        for index in (1, 2):
+            directory = self.root / str(index)
+            directory.mkdir()
+            write_csv(directory/"imu.csv", "time,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z",
+                      [(k*.5, .01*index, -.02, 9.80665, .001, .002, .003) for k in range(62)])
+            write_csv(directory/"data.csv", "time,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,quat_w,quat_x,quat_y,quat_z",
+                      [(k*.5, k*.1, 0., 0., .2, 0., 0., 1., 0., 0., 0.) for k in range(62)])
+            records.append({"id": f"fixture/{index}", "split": "train",
+                            "data_root": str(self.root), "data_drive": str(index)})
+        cutoffs = {record["id"]: 2.2 for record in records}
+        with contextlib.redirect_stdout(io.StringIO()):
+            network = CodeNet(ConfigFactory.from_dict(dict(network="codenet", propcov=True, gtrot=False))).float()
+        serial = AirIMUESKF(network, DifferentiableESKF())
+        parallel = copy.deepcopy(serial)
+        serial_optimizer = torch.optim.Adam([p for p in serial.parameters() if p.requires_grad], lr=1e-5)
+        parallel_optimizer = torch.optim.Adam([p for p in parallel.parameters() if p.requires_grad], lr=1e-5)
+        logged = []
+        with contextlib.redirect_stdout(io.StringIO()):
+            with FlightTrainer(serial, serial_optimizer, batch_size=2) as trainer:
+                serial_losses, _ = trainer.run_split(records, cutoffs, epoch=1, phase="train",
+                    epoch_start=perf_counter(), log=lambda row: None)
+                self.assertEqual(trainer.optimizer_steps, 1)
+            with FlightTrainer(parallel, parallel_optimizer, workers=2, batch_size=2) as trainer:
+                parallel_losses, statistics = trainer.run_split(records, cutoffs, epoch=1, phase="train",
+                    epoch_start=perf_counter(), log=logged.append)
+                misses = trainer.cache_misses
+                trainer.run_split(records, cutoffs, epoch=1, phase="validation",
+                    epoch_start=perf_counter(), log=lambda row: None)
+                self.assertEqual(trainer.cache_misses, misses)
+                self.assertEqual(trainer.cache_hits, 2)
+                self.assertLessEqual(trainer.feature_bytes, trainer.feature_limit)
+                self.assertEqual(trainer.optimizer_steps, 1)
+        torch.testing.assert_close(torch.tensor(serial_losses), torch.tensor(parallel_losses))
+        self.assertEqual(statistics["samples"], 112)
+        self.assertTrue(all(row["worker_pid"] != os.getpid() for row in logged))
+        for name, value in serial.network.state_dict().items():
+            torch.testing.assert_close(value, parallel.network.state_dict()[name], atol=1e-8, rtol=1e-6)
 
 
 if __name__ == "__main__":

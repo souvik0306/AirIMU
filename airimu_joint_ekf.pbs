@@ -24,7 +24,13 @@ dataset_config=${EKF_DATASET_CONFIG:-configs/datasets/TLab/tlab_body.conf}
 sensor_metadata_root=${SENSOR_METADATA_ROOT:-initial_sensor_biases}
 ekf_epochs=${EKF_EPOCHS:-30}
 ekf_learning_rate=${EKF_LR:-1e-5}
-cpu_threads=${EKF_CPU_THREADS:-8}
+cpu_threads=${EKF_CPU_THREADS:-1}
+replay_workers=${EKF_REPLAY_WORKERS:-4}
+flight_batch_size=${EKF_FLIGHT_BATCH_SIZE:-$((replay_workers > 0 ? replay_workers : 1))}
+feature_cache_mb=${EKF_FEATURE_CACHE_MB:-512}
+default_ekf_device=cpu
+if [[ "$replay_workers" == "0" ]]; then default_ekf_device=cuda:0; fi
+ekf_device=${EKF_DEVICE:-$default_ekf_device}
 run_fixed_baseline=${EKF_FIXED_BASELINE:-1}
 
 airimu_epoch_args=()
@@ -46,53 +52,68 @@ fi
 run_timestamp=$(TZ=Asia/Singapore date +%Y%m%d_%H%M%S_SGT)
 job_id=${PBS_JOBID%%.*}
 run_root=${EKF_RUN_ROOT:-experiments/${run_timestamp}_job${job_id}/joint_ekf}
+experiment_run_dir=${EKF_EXPERIMENT_DIR:-$run_root}
+if [[ -z "${EKF_EXPERIMENT_DIR:-}" && "$(basename "$run_root")" == "joint_ekf" ]]; then
+    experiment_run_dir=$(dirname "$run_root")
+fi
 stage1_output="$run_root/airimu_stage1"
 stage2_output="$run_root/airimu_stage2"
 ekf_training_output="$run_root/ekf_training"
-learned_evaluation="$run_root/evaluation_learned"
+inference_output="$experiment_run_dir/inference_ekf"
+state_evaluation="$experiment_run_dir/evaluation_results_ekf"
+learned_evaluation="$state_evaluation/eskf_test"
 fixed_evaluation="$run_root/evaluation_fixed"
 
-echo "Full scratch AirIMU and joint differentiable ESKF training"
+echo "AirIMU and joint differentiable ESKF workflow"
 echo "Run root: $run_root"
+echo "Best EKF model inference: $inference_output"
+echo "Best EKF model evaluation: $state_evaluation"
 echo "Dataset config: $dataset_config"
 echo "Sensor metadata: $sensor_metadata_root"
 echo "ESKF epochs: $ekf_epochs; ESKF learning rate: $ekf_learning_rate"
+echo "ESKF device: $ekf_device (AirIMU network: cuda:0)"
+echo "Replay workers: $replay_workers; threads/worker: 1; flights/Adam step: $flight_batch_size"
 echo "Working directory: $(pwd)"
 echo "Compute node: $(hostname)"
 nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
 
-echo "Starting AirIMU Stage 1 from random initialization."
-apptainer exec --nv -e "$image" \
-python3 -u train_motion_finetune.py \
---config "$stage1_config" \
---exp_dir "$stage1_output" \
---pretrained_ckpt none \
---device cuda:0 \
-"${airimu_epoch_args[@]}"
+if [[ -n "${AIRIMU_CKPT:-}" ]]; then
+    stage2_checkpoint=$AIRIMU_CKPT
+    echo "Using existing Stage 2 checkpoint: $stage2_checkpoint"
+else
+    echo "Starting AirIMU Stage 1 from random initialization."
+    apptainer exec --nv -e "$image" \
+    python3 -u train_motion_finetune.py \
+    --config "$stage1_config" \
+    --exp_dir "$stage1_output" \
+    --pretrained_ckpt none \
+    --device cuda:0 \
+    "${airimu_epoch_args[@]}"
 
-stage1_checkpoint="$stage1_output/ckpt/best_model.ckpt"
-if [[ ! -f "$stage1_checkpoint" ]]; then
-    echo "ERROR: AirIMU Stage 1 completed without best_model.ckpt" >&2
-    exit 3
+    stage1_checkpoint="$stage1_output/ckpt/best_model.ckpt"
+    if [[ ! -f "$stage1_checkpoint" ]]; then
+        echo "ERROR: AirIMU Stage 1 completed without best_model.ckpt" >&2
+        exit 3
+    fi
+
+    echo "Starting AirIMU Stage 2 from this job's new Stage 1 checkpoint."
+    apptainer exec --nv -e "$image" \
+    python3 -u train_motion_finetune.py \
+    --config "$stage2_config" \
+    --exp_dir "$stage2_output" \
+    --pretrained_ckpt "$stage1_checkpoint" \
+    --non_strict_pretrained \
+    --device cuda:0 \
+    "${airimu_epoch_args[@]}"
+
+    stage2_checkpoint="$stage2_output/ckpt/best_model.ckpt"
 fi
-
-echo "Starting AirIMU Stage 2 from this job's new Stage 1 checkpoint."
-apptainer exec --nv -e "$image" \
-python3 -u train_motion_finetune.py \
---config "$stage2_config" \
---exp_dir "$stage2_output" \
---pretrained_ckpt "$stage1_checkpoint" \
---non_strict_pretrained \
---device cuda:0 \
-"${airimu_epoch_args[@]}"
-
-stage2_checkpoint="$stage2_output/ckpt/best_model.ckpt"
 if [[ ! -f "$stage2_checkpoint" ]]; then
-    echo "ERROR: AirIMU Stage 2 completed without best_model.ckpt" >&2
+    echo "ERROR: Stage 2 checkpoint not found: $stage2_checkpoint" >&2
     exit 4
 fi
 
-echo "Starting joint ESKF training from this job's new Stage 2 checkpoint."
+echo "Starting joint ESKF training from the Stage 2 checkpoint: $stage2_checkpoint"
 apptainer exec --nv -e "$image" \
 python3 -u train_eskf.py \
 --config "$stage2_config" \
@@ -101,25 +122,54 @@ python3 -u train_eskf.py \
 --sensor-metadata-root "$sensor_metadata_root" \
 --output "$ekf_training_output" \
 --device cuda:0 \
+--ekf-device "$ekf_device" \
 --epochs "$ekf_epochs" \
 --lr "$ekf_learning_rate" \
---cpu-threads "$cpu_threads"
+--cpu-threads "$cpu_threads" \
+--replay-workers "$replay_workers" \
+--flight-batch-size "$flight_batch_size" \
+--feature-cache-mb "$feature_cache_mb"
 
 if [[ ! -f "$ekf_training_output/best_model.ckpt" ]]; then
     echo "ERROR: ESKF training completed without best_model.ckpt" >&2
     exit 5
 fi
 
-echo "Training finished. Evaluating learned covariance on the test split."
+ekf_best_checkpoint=$(realpath "$ekf_training_output/best_model.ckpt")
+mkdir -p "$inference_output" "$state_evaluation"
+
+echo "Training finished. Running inference with the best EKF checkpoint: $ekf_best_checkpoint"
+apptainer exec --nv -e "$image" \
+python3 -u inference.py \
+--config "$stage2_config" \
+--load "$ekf_best_checkpoint" \
+--exp_dir "$inference_output" \
+--device cuda:0
+
+if [[ ! -s "$inference_output/net_output.pickle" ]]; then
+    echo "ERROR: EKF model inference completed without net_output.pickle" >&2
+    exit 6
+fi
+
+echo "Evaluating best EKF model inference: $state_evaluation"
+apptainer exec -e "$image" \
+python3 -u evaluation/evaluate_state.py \
+--device cpu \
+--dataconf "$dataset_config" \
+--exp "$inference_output" \
+--savedir "$state_evaluation"
+
+echo "Evaluating the best EKF checkpoint on the test split: $learned_evaluation"
 apptainer exec --nv -e "$image" \
 python3 -u -m evaluation.evaluate_eskf \
 --config "$stage2_config" \
---ckpt "$ekf_training_output/best_model.ckpt" \
+--ckpt "$ekf_best_checkpoint" \
 --dataset-config "$dataset_config" \
 --sensor-metadata-root "$sensor_metadata_root" \
 --output "$learned_evaluation" \
 --split test \
 --device cuda:0 \
+--ekf-device "$ekf_device" \
 --cpu-threads "$cpu_threads"
 
 if [[ "$run_fixed_baseline" == "1" ]]; then
@@ -131,7 +181,8 @@ if [[ "$run_fixed_baseline" == "1" ]]; then
     --output "$fixed_evaluation" \
     --split test \
     --device cuda:0 \
+    --ekf-device "$ekf_device" \
     --cpu-threads "$cpu_threads"
 fi
 
-echo "Scratch AirIMU, joint ESKF training, and evaluation finished: $run_root"
+echo "AirIMU, joint ESKF training, and evaluation finished: $run_root"

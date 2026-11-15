@@ -2,7 +2,7 @@
 
 # Run the joint EKF PBS workflow directly on a Linux/ENS machine.
 # Run setup_airimu_ens.sh first, then: ./airimu_joint_ekf.sh
-# Starts from scratch by default; AIRIMU_CKPT optionally enables covariance-only fine-tuning.
+# Set AIRIMU_CKPT to the Stage 2 checkpoint for covariance-only fine-tuning.
 # Overrides match airimu_joint_ekf.pbs; also supports VENV_DIR and DEVICE.
 # Example: EKF_EPOCHS=10 DEVICE=cuda:0 ./airimu_joint_ekf.sh
 
@@ -25,17 +25,19 @@ source "$VENV_DIR/bin/activate"
 
 device=${DEVICE:-cuda:0}
 config=${EKF_CONFIG:-configs/exp/TLab/4th_Nov_Scratch_stage2.conf}
-checkpoint=${AIRIMU_CKPT:-}
-checkpoint_args=()
-if [[ -n "$checkpoint" ]]; then
-    [[ -f "$checkpoint" ]] || { echo "ERROR: checkpoint not found: $checkpoint" >&2; exit 2; }
-    checkpoint_args=(--ckpt "$checkpoint")
-fi
+checkpoint=${AIRIMU_CKPT:?Set AIRIMU_CKPT to the Stage 2 checkpoint}
+[[ -f "$checkpoint" ]] || { echo "ERROR: checkpoint not found: $checkpoint" >&2; exit 2; }
 dataset_config=${EKF_DATASET_CONFIG:-configs/datasets/TLab/tlab_body.conf}
 sensor_metadata_root=${SENSOR_METADATA_ROOT:-initial_sensor_biases}
 epochs=${EKF_EPOCHS:-30}
 learning_rate=${EKF_LR:-1e-4}
-cpu_threads=${EKF_CPU_THREADS:-8}
+cpu_threads=${EKF_CPU_THREADS:-1}
+replay_workers=${EKF_REPLAY_WORKERS:-0}
+flight_batch_size=${EKF_FLIGHT_BATCH_SIZE:-$((replay_workers > 0 ? replay_workers : 1))}
+feature_cache_mb=${EKF_FEATURE_CACHE_MB:-512}
+default_ekf_device=$device
+if [[ "$replay_workers" != "0" ]]; then default_ekf_device=cpu; fi
+ekf_device=${EKF_DEVICE:-$default_ekf_device}
 run_fixed_baseline=${EKF_FIXED_BASELINE:-1}
 
 for required_file in "$config" "$dataset_config"; do
@@ -58,10 +60,12 @@ fixed_evaluation="$run_root/evaluation_fixed"
 
 echo "Joint differentiable ESKF training"
 echo "Run root: $run_root"
-echo "Initialization: ${checkpoint:-scratch (encoder and covariance heads)}"
+echo "Initialization: $checkpoint"
 echo "Dataset config: $dataset_config"
 echo "Sensor metadata: $sensor_metadata_root"
 echo "Epochs: $epochs; learning rate: $learning_rate"
+echo "ESKF device: $ekf_device (AirIMU network: $device)"
+echo "Replay workers: $replay_workers; threads/worker: 1; flights/Adam step: $flight_batch_size"
 echo "Working directory: $(pwd)"
 echo "Compute node: $(hostname)"
 if command -v nvidia-smi >/dev/null 2>&1; then
@@ -70,14 +74,18 @@ fi
 
 python3 -u train_eskf.py \
 --config "$config" \
-"${checkpoint_args[@]}" \
+--ckpt "$checkpoint" \
 --dataset-config "$dataset_config" \
 --sensor-metadata-root "$sensor_metadata_root" \
 --output "$training_output" \
 --device "$device" \
+--ekf-device "$ekf_device" \
 --epochs "$epochs" \
 --lr "$learning_rate" \
---cpu-threads "$cpu_threads"
+--cpu-threads "$cpu_threads" \
+--replay-workers "$replay_workers" \
+--flight-batch-size "$flight_batch_size" \
+--feature-cache-mb "$feature_cache_mb"
 
 if [[ ! -f "$training_output/best_model.ckpt" ]]; then
     echo "ERROR: ESKF training completed without best_model.ckpt" >&2
@@ -93,6 +101,7 @@ python3 -u -m evaluation.evaluate_eskf \
 --output "$learned_evaluation" \
 --split test \
 --device "$device" \
+--ekf-device "$ekf_device" \
 --cpu-threads "$cpu_threads"
 
 if [[ "$run_fixed_baseline" == "1" ]]; then
@@ -103,6 +112,7 @@ if [[ "$run_fixed_baseline" == "1" ]]; then
     --output "$fixed_evaluation" \
     --split test \
     --device "$device" \
+    --ekf-device "$ekf_device" \
     --cpu-threads "$cpu_threads"
 fi
 

@@ -131,6 +131,7 @@ class DifferentiableESKF(nn.Module):
         self.register_buffer("velocity_R", torch.eye(3, dtype=dtype) * .05**2)
         self.register_buffer("yaw_R", torch.tensor([[math.radians(2)**2]], dtype=dtype))
         self.register_buffer("innovation_jitter", torch.tensor(1e-9, dtype=dtype))
+        self.register_buffer("_eye15", torch.eye(15, dtype=dtype), persistent=False)
 
     def initialize(self, initial_position, initial_velocity, initial_quaternion,
                    initial_accel_bias=None, initial_gyro_bias=None, initial_covariance=None):
@@ -222,14 +223,18 @@ class DifferentiableESKF(nn.Module):
             raise ValueError("Prediction requires acceleration[3], gyroscope[3], and variance[6].")
         if not bool(torch.isfinite(variance).all()) or bool((variance < 0).any()):
             raise ValueError("IMU variances must be finite and nonnegative.")
+        return self._predict(state, covariance, acceleration, gyroscope, variance, dt)
+
+    def _predict(self, state, covariance, acceleration, gyroscope, variance, dt):
+        """Prediction after run_sequence has validated the complete input arrays."""
         P_pred = self.predict_covariance(state, covariance, acceleration, gyroscope, variance, dt)
         return self.propagate_nominal_state(state, acceleration, gyroscope, dt), P_pred
 
-    def measurement_model(self, state, observation, observation_type):
+    def measurement_model(self, state, observation, observation_type, *, yaw_validity=None):
         if observation_type not in self.observation_types:
             raise ValueError(f"Vicon channel {observation_type!r} is not enabled.")
         observation = _tensor(observation, state.position)
-        eye = torch.eye(15, dtype=state.position.dtype, device=state.position.device)
+        eye = self._eye15
         if observation_type == "position":
             if observation.shape not in ((2,), (3,)):
                 raise ValueError("Position observation must contain xy or xyz (z is ignored).")
@@ -250,8 +255,14 @@ class DifferentiableESKF(nn.Module):
         rotation = quaternion_matrix(state.quaternion)
         x, y = rotation[0, 0], rotation[1, 0]
         denominator = x.square() + y.square()
-        if bool(denominator < 1e-12):
-            raise ValueError("Yaw is undefined for a vertical body x-axis.")
+        if yaw_validity is None:
+            if bool(denominator < 1e-12):
+                raise ValueError("Yaw is undefined for a vertical body x-axis.")
+        else:
+            # Delay the device-to-host check until replay ends. Keep invalid
+            # denominators finite so the same domain error can be reported then.
+            yaw_validity.append(denominator >= 1e-12)
+            denominator = denominator.clamp_min(1e-12)
         jacobian = torch.stack((x*0,
             (y*rotation[0, 2] - x*rotation[1, 2]) / denominator,
             (x*rotation[1, 1] - y*rotation[0, 1]) / denominator))
@@ -274,8 +285,13 @@ class DifferentiableESKF(nn.Module):
 
     def update_vicon(self, state, covariance, observation, observation_type):
         self._check_precision(state, covariance)
-        residual, H = self.measurement_model(state, observation, observation_type)
-        if not bool(torch.isfinite(residual).all()):
+        return self._update_vicon(state, covariance, observation, observation_type)
+
+    def _update_vicon(self, state, covariance, observation, observation_type, *, validated=False,
+                      yaw_validity=None):
+        residual, H = self.measurement_model(state, observation, observation_type,
+                                             yaw_validity=yaw_validity)
+        if not validated and not bool(torch.isfinite(residual).all()):
             raise ValueError("Vicon observation must be finite.")
         R = getattr(self, observation_type + "_R")
         S = _symmetric(H @ covariance @ H.T + R)
@@ -284,7 +300,7 @@ class DifferentiableESKF(nn.Module):
         K = torch.cholesky_solve((covariance @ H.T).T, L).T
         delta = K @ residual
         corrected = self.inject_error_state(state, delta)
-        A = torch.eye(15, dtype=S.dtype, device=S.device) - K @ H
+        A = self._eye15 - K @ H
         updated = A @ covariance @ A.T + K @ R @ K.T
         return self.reset_error_state(corrected, updated, delta)
 
@@ -293,8 +309,40 @@ class DifferentiableESKF(nn.Module):
         if any(value.dtype != torch.float64 or value.device != covariance.device for value in tensors):
             raise ValueError("State, covariance, and filter must share a device and use Float64.")
 
+    def _prepare_observations(self, events):
+        """Transfer observations in batches, and compute fixed quaternion yaw once."""
+        groups = {}
+        for index, event in enumerate(events):
+            observation = torch.as_tensor(event.observation, dtype=torch.float64)
+            shape = tuple(observation.shape)
+            channel = event.observation_type
+            if channel == "position":
+                valid = shape in ((2,), (3,))
+            elif channel in ("velocity", "velocity_xy"):
+                valid = shape in ((3,),) if channel == "velocity" else shape in ((2,), (3,))
+            else:
+                valid = shape == (4,) or observation.numel() == 1
+            if not valid:
+                raise ValueError(f"{channel} observation has the wrong shape.")
+            groups.setdefault((channel, shape, observation.device), []).append((index, observation))
+        prepared = list(events)
+        for (channel, shape, _), entries in groups.items():
+            values = torch.stack([observation for _, observation in entries]).to(self.gravity.device)
+            if not bool(torch.isfinite(values).all()):
+                raise ValueError("Vicon observation must be finite.")
+            if channel == "yaw" and shape == (4,):
+                norms = torch.linalg.vector_norm(values, dim=-1)
+                if bool((norms < 1e-12).any()):
+                    raise ValueError("Vicon quaternion must have nonzero norm.")
+                w, x, y, z = (values / norms[:, None]).unbind(-1)
+                values = torch.atan2(2 * (x*y + w*z), 1 - 2 * (y*y + z*z))
+            for (index, _), observation in zip(entries, values.unbind(0)):
+                event = events[index]
+                prepared[index] = ViconEvent(event.timestamp, channel, observation)
+        return prepared
+
     def run_sequence(self, imu, imu_time, imu_variance, vicon_events, cutoff_timestamp,
-                     initial_state, initial_covariance):
+                     initial_state, initial_covariance, *, return_covariance=True):
         """Replay one chronological flight with zero-order-held raw IMU.
 
         imu is [N,6] (acc then gyro), or a mapping with ``acc``/``gyro``.
@@ -302,6 +350,8 @@ class DifferentiableESKF(nn.Module):
         interval. Each subinterval uses its actual dt for increment noise.
         Output includes the initial state and has one row per IMU timestamp.
         Timestamp scheduling is fixed and must not require gradients.
+        With return_covariance=False, omit covariance history and its unused
+        propagation after cutoff. Nominal states and their gradients are retained.
         """
         if self.gravity.dtype != torch.float64:
             raise ValueError("Filter buffers must remain Float64.")
@@ -331,6 +381,7 @@ class DifferentiableESKF(nn.Module):
             for field in fields(EKFState)})
         P = _tensor(initial_covariance, self.gravity)
         _finite_shape(P, (15, 15), "initial_covariance")
+        self._check_precision(state, P)
         # Accept already initialized differentiable states without detaching.
         for field in fields(EKFState):
             _finite_shape(getattr(state, field.name),
@@ -356,23 +407,40 @@ class DifferentiableESKF(nn.Module):
                 if event.observation_type not in self.observation_types:
                     raise ValueError(f"Unexpected Vicon channel: {event.observation_type}.")
                 events.append(event)
+        events = self._prepare_observations(events)
+        boundaries = sorted(set(schedule).union(float(event.timestamp) for event in events))
+        durations = sorted({end-start for start, end in zip(boundaries, boundaries[1:])})
+        # Copy all integration intervals once rather than creating a CUDA scalar
+        # from a Python float at every IMU step (and in each prediction helper).
+        device_durations = dict(zip(durations, times.new_tensor(durations).unbind()))
         history = {field.name: [] for field in fields(EKFState)}
         covariance_history = []
+        yaw_validity = []
         event_index = 0
 
         def fuse_at(timestamp, current_state, current_P):
             nonlocal event_index
             while event_index < len(events) and float(events[event_index].timestamp) == timestamp:
                 event = events[event_index]
-                current_state, current_P = self.update_vicon(
-                    current_state, current_P, event.observation, event.observation_type)
+                current_state, current_P = self._update_vicon(
+                    current_state, current_P, event.observation, event.observation_type,
+                    validated=True, yaw_validity=yaw_validity)
                 event_index += 1
             return current_state, current_P
 
         def record():
             for field in fields(EKFState):
                 history[field.name].append(getattr(state, field.name))
-            covariance_history.append(P)
+            if return_covariance:
+                covariance_history.append(P)
+
+        def propagate(current_state, current_P, sample, start, end):
+            dt = device_durations[end - start]
+            if not return_covariance and start >= cutoff:
+                return self.propagate_nominal_state(current_state, imu[sample, :3],
+                                                    imu[sample, 3:], dt), current_P
+            return self._predict(current_state, current_P, imu[sample, :3],
+                                 imu[sample, 3:], variance[sample], dt)
 
         state, P = fuse_at(schedule[0], state, P)
         record()
@@ -381,16 +449,19 @@ class DifferentiableESKF(nn.Module):
             while event_index < len(events) and float(events[event_index].timestamp) <= end:
                 event_time = float(events[event_index].timestamp)
                 if event_time > current_time:
-                    state, P = self.predict(state, P, imu[k, :3], imu[k, 3:],
-                                             variance[k], event_time - current_time)
+                    state, P = propagate(state, P, k, current_time, event_time)
                 state, P = fuse_at(event_time, state, P)
                 current_time = event_time
             if end > current_time:
-                state, P = self.predict(state, P, imu[k, :3], imu[k, 3:],
-                                         variance[k], end - current_time)
+                state, P = propagate(state, P, k, current_time, end)
             record()
         result = {key: torch.stack(values) for key, values in history.items()}
-        result["covariance"] = torch.stack(covariance_history)
+        if return_covariance:
+            result["covariance"] = torch.stack(covariance_history)
+        if yaw_validity and not bool(torch.stack(yaw_validity).all()):
+            raise ValueError("Yaw is undefined for a vertical body x-axis.")
+        if any(not bool(torch.isfinite(value).all()) for value in result.values()):
+            raise ValueError("ESKF replay produced a non-finite trajectory.")
         return result
 
     def forward(self, *args, **kwargs):

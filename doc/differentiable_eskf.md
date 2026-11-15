@@ -131,19 +131,76 @@ python train_eskf.py \
   --output experiments/eskf_run --device cuda:0 --epochs 10
 ```
 
-`AirIMUESKF` calls `network.inference()` for covariance only. It freezes the
-backbone and correction heads using a local covariance-only policy, retains loaded
-covariance-head weights, and passes untouched raw IMU into the ESKF. Nine repeated
-leading raw samples provide CNN context without requiring GT attitude. The
-network runs in Float32 and the differentiable conversion to Float64 preserves
-gradients into its uncertainty heads. Each flight is replayed from initialization
-with a complete graph; one optimizer step is taken per flight. Validation runs in
-evaluation mode, and the best checkpoint is selected by validation horizontal MSE.
-Long aided prefixes consume more memory because their graph is retained.
+`AirIMUESKF` freezes the backbone and correction heads, extracts fixed features,
+and trains the loaded covariance heads. Untouched raw IMU goes into the ESKF.
+Nine repeated leading samples provide CNN context without GT attitude. The
+network runs in Float32; conversion to Float64 preserves covariance gradients.
+Each flight retains its complete aided-prefix graph. The CLI defaults to one
+optimizer step per flight; validation horizontal MSE selects the best checkpoint.
 
 Outputs include `best_model.ckpt`, `newest.ckpt`, `metrics.jsonl`, and
 `eskf_metadata.json`, with cutoff/channel/frame settings recorded for review.
 The checkpoint's `model_state_dict` can be loaded by the existing AirIMU tools.
+
+Training also writes `flights.jsonl` and prints each flight's start, index, loss,
+and replay timings. Batch logs time GPU heads, head backward and Adam. Both training
+and validation report `acc_cov` and `gyro_cov` mean/min/max arrays in x/y/z order.
+These are predicted **per-sample variances**, not standard deviations or EKF state
+covariances. Training statistics describe the predictions used for that flight,
+before its optimizer update. Epoch summaries combine means weighted by the number
+of IMU samples and retain the minimum/maximum across all flights in each split.
+
+Replay validates complete input arrays up front, transfers Vicon observations and
+integration intervals in batches, and computes fixed observed yaw once. During
+training and validation, `return_covariance=False` omits covariance history and
+stops propagating covariance after cutoff. Nominal states and the full
+velocity-loss gradient remain connected through the aided prefix and cutoff.
+The default Python interface and the evaluator still return complete covariance
+trajectories.
+
+`--device` selects the AirIMU network device. The optional `--ekf-device cpu` keeps
+the small Float64 filter operations on CPU while the network can remain on GPU;
+the variance transfer preserves autograd. Without this override, parallel replay
+uses CPU and serial replay uses `--device`.
+The shell/PBS training workflows expose the filter choice as `EKF_DEVICE`.
+
+For several CPU cores plus one GPU, the trainer can batch covariance prediction
+on the GPU while independent CPU processes replay complete flights:
+
+```bash
+python train_eskf.py \
+  --config configs/exp/TLab/4th_Nov_Scratch_stage2.conf \
+  --ckpt path/to/stage2/best_model.ckpt \
+  --dataset-config configs/datasets/TLab/tlab_body.conf \
+  --sensor-metadata-root initial_sensor_biases --output experiments/eskf_parallel \
+  --device cuda:0 --ekf-device cpu --replay-workers 4 --flight-batch-size 4 \
+  --cpu-threads 1 --feature-cache-mb 512
+```
+
+Workers use one PyTorch thread each and return the exact full-flight
+`d(loss)/d(variance)`. The main process applies these gradients to the GPU heads
+and runs Adam. Validation reuses the workers without building an autograd graph.
+
+`--flight-batch-size` is the number of complete-flight losses **averaged per Adam
+step**. Larger batches change update frequency from the original one-step-per-flight
+training; they do not truncate flights, omit IMU/aiding samples, or approximate
+the gradient. Batch size 1 and `--replay-workers 0` retain the original update
+frequency. Use a batch size at least as large as the worker count to use all
+workers in a batch.
+
+Frozen CNN/GRU features and detached correction features are cached on CPU under
+`--feature-cache-mb` (default 512 MiB); 0 disables caching. Trainable covariance
+heads are recomputed after Adam updates. The next batch's fixed features are
+prepared while workers replay the current batch. Logs report worker CPU time,
+peak memory, replay time, head timings, and cache size.
+
+The existing 36-core/250-GB PBS workflow defaults to four replay workers and four
+flights per batch. Override `EKF_REPLAY_WORKERS`, `EKF_FLIGHT_BATCH_SIZE`,
+`EKF_CPU_THREADS`, and `EKF_FEATURE_CACHE_MB` as needed.
+Each simultaneous replay retains its own full autograd graph, so scale worker
+count using observed worker peak memory as well as available CPU cores.
+`AIRIMU_CKPT=/path/to/stage2/best_model.ckpt` skips the completed AirIMU stages.
+The direct shell workflow keeps zero replay workers by default for smaller hosts.
 
 Evaluate learned covariance or a fixed-noise baseline:
 

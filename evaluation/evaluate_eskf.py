@@ -7,12 +7,13 @@ import argparse
 import json
 import math
 from pathlib import Path
+from time import perf_counter
 
 import torch
 
 from ekf import DifferentiableESKF, velocity_evaluation_mask
 from ekf.data import apply_sensor_metadata, prepare_flight, read_dataset_flights
-from ekf.experiment import load_airimu, xy_metrics
+from ekf.experiment import covariance_statistics, load_airimu, xy_metrics
 
 
 def main():
@@ -30,6 +31,7 @@ def main():
     parser.add_argument("--gyro-variance", type=float, default=.001, help="Per-sample variance on each gyro axis")
     parser.add_argument("--gravity", type=float, nargs=3, default=(0., 0., -9.80665))
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--ekf-device", help="Filter device; defaults to --device")
     parser.add_argument("--cpu-threads", type=int, default=1)
     args = parser.parse_args()
     if bool(args.config) != bool(args.ckpt):
@@ -43,7 +45,8 @@ def main():
     if not flights:
         parser.error(f"No flights in split={args.split}.")
     flights, cutoffs = apply_sensor_metadata(flights, args.sensor_metadata_root)
-    ekf = DifferentiableESKF(gravity=args.gravity).to(args.device)
+    ekf_device = args.ekf_device or args.device
+    ekf = DifferentiableESKF(gravity=args.gravity).to(ekf_device)
     wrapper = load_airimu(args.config, args.ckpt, ekf, args.device) if args.ckpt else None
     if wrapper:
         wrapper.eval()
@@ -52,6 +55,9 @@ def main():
     reports = []
     with torch.no_grad():
         for index, record in enumerate(flights):
+            started = perf_counter()
+            print(f"split={args.split} flight={record['id']} progress={index+1}/{len(flights)} "
+                  "status=started", flush=True)
             cutoff = cutoffs[record["id"]]
             flight = prepare_flight(record, cutoff, ekf)
             if wrapper:
@@ -60,7 +66,7 @@ def main():
                 variance = output["imu_variance"]
             else:
                 variance = torch.tensor([args.accel_variance]*3 + [args.gyro_variance]*3,
-                                         dtype=torch.float64, device=args.device).repeat(len(flight["imu_time"]), 1)
+                                         dtype=torch.float64, device=ekf_device).repeat(len(flight["imu_time"]), 1)
                 trajectory = ekf.run_sequence(
                     {"acc": flight["raw_acceleration"], "gyro": flight["raw_gyroscope"]},
                     flight["imu_time"], variance, flight["vicon_events"], cutoff,
@@ -70,6 +76,8 @@ def main():
                       "cutoff_timestamp": cutoff, "evaluation_start": cutoff+5.,
                       "evaluation_end": cutoff+25., "gravity": list(args.gravity),
                       "observation_types": list(ekf.observation_types),
+                      "network_device": args.device, "ekf_device": ekf_device,
+                      "covariance": covariance_statistics(variance),
                       "ekf_vs_vicon": xy_metrics(trajectory["velocity"], flight["vicon_velocity_gt"], mask)}
             artifact_name = f"flight_{index:04d}.pt"
             torch.save({"id": record["id"], "imu_time": flight["imu_time"].cpu(),
@@ -77,6 +85,7 @@ def main():
                         "imu_variance": variance.cpu(), "vicon_velocity_gt": flight["vicon_velocity_gt"].cpu(),
                         "evaluation_mask": mask.cpu(), "report": report}, output_dir / artifact_name)
             report["trajectory_file"] = artifact_name
+            report["elapsed_seconds"] = perf_counter()-started
             reports.append(report)
             print(json.dumps(report), flush=True)
             if wrapper:
