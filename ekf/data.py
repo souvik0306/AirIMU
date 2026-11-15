@@ -13,7 +13,9 @@ import re
 from pyhocon import ConfigFactory
 import torch
 
-from .eskf import ViconEvent, normalize_quaternion
+from datasets.TLabdataset import TLab
+
+from .eskf import ViconEvent
 
 
 _DATASET_METADATA_DIRECTORIES = {
@@ -140,11 +142,6 @@ def apply_sensor_metadata(flights, root):
     return enriched, cutoffs
 
 
-def load_flight_metadata(flights, sensor_metadata_root):
-    """Load fixed initial biases and cutoff timestamps for dataset flights."""
-    return apply_sensor_metadata(flights, sensor_metadata_root)
-
-
 def read_dataset_flights(path):
     """Build ESKF records from the train/test/eval TLab dataset config."""
     config = ConfigFactory.parse_file(str(Path(path).resolve()))
@@ -177,53 +174,12 @@ def read_dataset_flights(path):
                 flights.append({
                     "id": flight_id,
                     "split": eskf_split,
-                    "imu_csv": str(imu_csv),
-                    "data_csv": str(data_csv),
+                    "data_root": str(data_root),
+                    "data_drive": drive,
                 })
     if not flights:
         raise ValueError("Dataset config contains no TLab flights.")
     return flights
-
-
-def read_numeric_csv(path, columns):
-    with open(path, newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        if not set(columns) <= set(reader.fieldnames or ()):
-            raise ValueError(f"{path} requires columns {columns}.")
-        rows = [[float(row[key]) for key in columns] for row in reader]
-    values = torch.tensor(rows, dtype=torch.float64)
-    if values.ndim != 2 or len(values) < 2 or not bool(torch.isfinite(values).all()):
-        raise ValueError(f"{path} must contain at least two finite numeric rows.")
-    if not bool((values[1:, 0] > values[:-1, 0]).all()):
-        raise ValueError(f"{path} timestamps must be strictly increasing; export each arrival once.")
-    return values
-
-
-def interpolate(timestamps, values, target):
-    """Fixed-observation linear interpolation, with no extrapolation."""
-    if bool((target < timestamps[0]).any()) or bool((target > timestamps[-1]).any()):
-        raise ValueError("Recorded observations do not cover the requested timestamps.")
-    upper = torch.searchsorted(timestamps.contiguous(), target.contiguous()).clamp(1, len(timestamps)-1)
-    lower = upper - 1
-    weight = ((target - timestamps[lower]) / (timestamps[upper] - timestamps[lower]))[:, None]
-    return values[lower] * (1-weight) + values[upper] * weight
-
-
-def _interpolate_quaternion(timestamps, quaternions, target):
-    """Shortest-arc SLERP for the fixed initial Vicon attitude."""
-    if float(target) < float(timestamps[0]) or float(target) > float(timestamps[-1]):
-        raise ValueError("Vicon attitude does not cover initialization.")
-    upper = int(torch.searchsorted(timestamps.contiguous(), target).clamp(1, len(timestamps)-1))
-    lower = upper - 1
-    a, b = (normalize_quaternion(quaternions[index]) for index in (lower, upper))
-    if float(a @ b) < 0:
-        b = -b
-    dot = (a @ b).clamp(-1, 1)
-    weight = (target - timestamps[lower]) / (timestamps[upper] - timestamps[lower])
-    if float(dot) > .9995:
-        return normalize_quaternion((1-weight)*a + weight*b)
-    angle = torch.acos(dot)
-    return (torch.sin((1-weight)*angle)*a + torch.sin(weight*angle)*b) / torch.sin(angle)
 
 
 def prepare_flight(record, cutoff_timestamp, ekf):
@@ -232,44 +188,54 @@ def prepare_flight(record, cutoff_timestamp, ekf):
     data.csv: time,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,
               quat_w,quat_x,quat_y,quat_z.
     """
-    imu = read_numeric_csv(record["imu_csv"], (
-        "time", "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"))
-    vicon = read_numeric_csv(record["data_csv"], (
-        "time", "pos_x", "pos_y", "pos_z", "vel_x", "vel_y", "vel_z",
-        "quat_w", "quat_x", "quat_y", "quat_z"))
+    sequence = TLab(record["data_root"], record["data_drive"])
+    imu_time = sequence.data["time"]
+    imu = torch.cat((imu_time[:, None], sequence.data["acc"], sequence.data["gyro"]), dim=1)
+    vicon = torch.cat((
+        sequence.data["gt_time"][:, None], sequence.data["gt_translation"],
+        sequence.data["velocity"], torch.as_tensor(sequence.data["quat"], dtype=torch.float64),
+    ), dim=1)
+    if not bool((imu_time[1:] > imu_time[:-1]).all()):
+        raise ValueError("TLab timestamps must be strictly increasing.")
     start = float(record.get("start_timestamp", imu[0, 0]))
     end = float(cutoff_timestamp) + 25.
     if start >= cutoff_timestamp or float(imu[-1, 0]) < end:
         raise ValueError("Flight requires an aided start and IMU coverage through cutoff+25.")
-    selected = imu[(imu[:, 0] >= start) & (imu[:, 0] <= end)]
+    selected_mask = (imu[:, 0] >= start) & (imu[:, 0] <= end)
+    selected = imu[selected_mask]
+    selected_vicon = vicon[selected_mask]
     if len(selected) < 2 or float(selected[0, 0]) >= cutoff_timestamp:
         raise ValueError("No valid aided IMU prefix for this flight.")
+    terminal_velocity = None
     if float(selected[-1, 0]) < end:
         # Terminal output at exactly T_e; last real IMU sample is held to T_e.
+        upper = int(torch.searchsorted(vicon[:, 0].contiguous(), vicon.new_tensor(end)))
+        lower = upper - 1
+        weight = (end - vicon[lower, 0]) / (vicon[upper, 0] - vicon[lower, 0])
+        terminal_velocity = torch.lerp(vicon[lower, 4:7], vicon[upper, 4:7], weight)
         selected = torch.cat((selected, torch.cat((torch.tensor([end], dtype=torch.float64),
                                                    selected[-1, 1:]))[None]))
     times = selected[:, 0].contiguous()
-    aided_vicon = vicon[vicon[:, 0] < cutoff_timestamp]
+    aided_vicon = selected_vicon[selected_vicon[:, 0] < cutoff_timestamp]
     if len(aided_vicon) < 2:
-        raise ValueError("At least two original Vicon samples are needed before cutoff.")
+        raise ValueError("At least two aligned Vicon samples are needed before cutoff.")
     if not bool((aided_vicon[:, 0] > times[0]).any()):
         raise ValueError("At least one aided update must follow initialization before cutoff.")
-    initial_time = times[:1]
-    position = interpolate(aided_vicon[:, 0], aided_vicon[:, 1:4], initial_time)[0]
-    quaternion = _interpolate_quaternion(aided_vicon[:, 0], aided_vicon[:, 7:11], times[0])
-    velocity = interpolate(aided_vicon[:, 0], aided_vicon[:, 4:7], initial_time)[0]
+    position, velocity, quaternion = aided_vicon[0, 1:4], aided_vicon[0, 4:7], aided_vicon[0, 7:11]
     state, covariance = ekf.initialize(position, velocity, quaternion,
         record.get("initial_accel_bias"), record.get("initial_gyro_bias"))
     events = []
     for row in aided_vicon:
         timestamp = float(row[0])
-        if timestamp < float(times[0]):
+        if timestamp <= float(times[0]):
             continue
         observations = {"position": row[1:4], "velocity_xy": row[4:6],
                         "velocity": row[4:7], "yaw": row[7:11]}
         for channel in ekf.observation_types:
             events.append(ViconEvent(timestamp, channel, observations[channel]))
-    gt_velocity = interpolate(vicon[:, 0], vicon[:, 4:7], times)
+    gt_velocity = selected_vicon[:, 4:7]
+    if terminal_velocity is not None:
+        gt_velocity = torch.cat((gt_velocity, terminal_velocity[None]))
     return dict(raw_acceleration=selected[:, 1:4].to(ekf.gravity.device),
                 raw_gyroscope=selected[:, 4:7].to(ekf.gravity.device),
                 imu_time=times.to(ekf.gravity.device), vicon_events=events,

@@ -109,9 +109,8 @@ All timestamps are seconds in the **same reference**. The standard aligned
 `data.csv` supplies Vicon pose and velocity for initialization, pre-cutoff aiding,
 and the post-cutoff velocity target.
 
-The loader initializes position, velocity, and attitude from pre-cutoff Vicon at
-the first IMU timestamp. It uses linear interpolation for position/velocity and
-shortest-arc SLERP for attitude, with no extrapolation. Initial accelerometer and
+The loader reuses the standard TLab loader and initializes position, velocity,
+and attitude from its aligned first selected row. Initial accelerometer and
 gyroscope biases come from `initial_sensor_biases`. No bias is pre-subtracted from IMU.
 
 Flights must cover the complete evaluation interval and contain aiding after
@@ -174,15 +173,15 @@ EKF–Vicon error on the evaluation interval.
 
 ```python
 import torch
-from ekf import DifferentiableESKF, run_ekf_sequence, horizontal_velocity_loss
+from ekf import DifferentiableESKF, horizontal_velocity_loss
 
 ekf = DifferentiableESKF().to(device)
 state, P = ekf.initialize(vicon_initial_position, vicon_initial_velocity,
                           vicon_initial_quaternion_wxyz)
 imu_variance = torch.full((len(imu_time), 6), .001,
                           dtype=torch.float64, device=device, requires_grad=True)
-result = run_ekf_sequence(imu, imu_time, imu_variance, vicon_events,
-                          cutoff, state, P, ekf=ekf)
+result = ekf.run_sequence(imu, imu_time, imu_variance, vicon_events,
+                           cutoff, state, P)
 mask = (imu_time >= cutoff + 5) & (imu_time <= cutoff + 25)
 loss = horizontal_velocity_loss(result["velocity"], vicon_velocity_gt, mask)
 loss.backward()
@@ -205,5 +204,5 @@ The suite covers initialization, gravity, quaternion and bias propagation,
 covariance symmetry/PSD and units, finite-difference transition/reset/yaw
 Jacobians, event splitting and cutoff continuity, autograd/finite-difference
 agreement, pre/post-cutoff sensitivity, real CodeNet covariance-head gradients,
-frozen weights/buffers, input interpolation, and sensor-metadata matching.
+frozen weights/buffers, aligned TLab loading, and sensor-metadata matching.
 It includes a full 200 Hz replay through cutoff+25 seconds with backpropagation.

@@ -8,8 +8,7 @@ import unittest
 import torch
 
 from ekf import DifferentiableESKF
-from ekf.data import (interpolate, load_flight_metadata, prepare_flight,
-                      read_dataset_flights, read_numeric_csv,
+from ekf.data import (apply_sensor_metadata, prepare_flight, read_dataset_flights,
                       read_sensor_metadata_table)
 
 
@@ -44,44 +43,33 @@ class FlightDataTests(unittest.TestCase):
         self.assertEqual(parsed[("AI", 1)]["bag_file"], "flight_1.bag")
         record = self.make_record()
         record["id"] = "T-Lab_31st_July_dataset/UN/flight_1"
-        flights, cutoffs = load_flight_metadata([record], metadata_root)
+        flights, cutoffs = apply_sensor_metadata([record], metadata_root)
         self.assertEqual(cutoffs[record["id"]], 1002.2)
         self.assertEqual(flights[0]["initial_accel_bias"], [.1, .2, .3])
         self.assertEqual(flights[0]["initial_gyro_bias"], [.01, .02, .03])
         self.assertEqual(flights[0]["sensor_metadata"]["bias_samples"], 200)
 
-    def test_interpolation_refuses_extrapolation_and_arrival_duplicates(self):
-        time = torch.tensor([0., 1., 2.], dtype=torch.float64)
-        values = torch.stack((time, time*2), dim=-1)
-        result = interpolate(time, values, torch.tensor([.5, 2.], dtype=torch.float64))
-        torch.testing.assert_close(result, torch.tensor([[.5, 1.], [2., 4.]], dtype=torch.float64))
-        with self.assertRaises(ValueError):
-            interpolate(time, values, torch.tensor([3.], dtype=torch.float64))
-        path = self.root / "repeated.csv"
-        write_csv(path, "time,x", [(0., 1.), (0., 2.)])
-        with self.assertRaises(ValueError):
-            read_numeric_csv(path, ("time", "x"))
-
     def make_record(self):
         write_csv(self.root / "imu.csv", "time,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z",
                   [(float(k), 0., 0., 9.80665, 0., 0., 0.) for k in range(29)])
         write_csv(self.root / "data.csv", "time,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,quat_w,quat_x,quat_y,quat_z",
-                  [(t, .5*t, 0., 1., .5, 0., 0., sign, 0., 0., 0.)
-                   for t, sign in ((0., 1.), (.5, -1.), (1.5, 1.), (2.5, -1.), (28., 1.))])
+                  [(float(k), .5*k, 0., 1., .5, 0., 0., 1., 0., 0., 0.)
+                   for k in range(29)])
         return {"id": "collection/AI/flight_1", "split": "train", "start_timestamp": 1.,
-                "imu_csv": str(self.root / "imu.csv"), "data_csv": str(self.root / "data.csv")}
+                "data_root": str(self.root), "data_drive": "."}
 
     def test_pose_velocity_initialization_and_terminal_timestamp(self):
         ekf = DifferentiableESKF()
         record = self.make_record()
         flight = prepare_flight(record, 2.2, ekf)
         state = flight["initial_state"]
-        torch.testing.assert_close(state.position, torch.tensor([.5, 0., 1.], dtype=torch.float64))
+        # The shared TLab loader translates the flight's first position to the origin.
+        torch.testing.assert_close(state.position, torch.tensor([.5, 0., 0.], dtype=torch.float64))
         torch.testing.assert_close(state.velocity, torch.tensor([.5, 0., 0.], dtype=torch.float64))
         self.assertAlmostEqual(abs(float(state.quaternion[0])), 1.)
         self.assertEqual(float(flight["imu_time"][-1]), 27.2)
         self.assertEqual(len(flight["vicon_events"]), 3)
-        self.assertTrue(all(event.timestamp == 1.5 for event in flight["vicon_events"]))
+        self.assertTrue(all(event.timestamp == 2. for event in flight["vicon_events"]))
         self.assertEqual(flight["raw_acceleration"].dtype, torch.float64)
         self.assertFalse(state.velocity.requires_grad)
         torch.testing.assert_close(state.accelerometer_bias, torch.zeros(3, dtype=torch.float64))
@@ -116,8 +104,8 @@ class FlightDataTests(unittest.TestCase):
         flights = read_dataset_flights(config)
         self.assertEqual([record["split"] for record in flights],
                          ["train", "validation", "test"])
-        self.assertEqual(flights[0]["imu_csv"],
-                         str(roots["train"] / "AI" / "flight_1" / "imu.csv"))
+        self.assertEqual(flights[0]["data_root"], str(roots["train"].resolve()))
+        self.assertEqual(flights[0]["data_drive"], "AI/flight_1")
 
         duplicate = self.root / "duplicate.conf"
         duplicate.write_text("\n".join(

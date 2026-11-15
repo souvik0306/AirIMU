@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 
 from ekf import DifferentiableESKF, velocity_evaluation_mask
-from ekf.data import load_flight_metadata, prepare_flight, read_dataset_flights
+from ekf.data import apply_sensor_metadata, prepare_flight, read_dataset_flights
 from ekf.experiment import load_airimu, xy_metrics
 
 
@@ -42,7 +42,7 @@ def main():
                if record["split"] == args.split]
     if not flights:
         parser.error(f"No flights in split={args.split}.")
-    flights, cutoffs = load_flight_metadata(flights, args.sensor_metadata_root)
+    flights, cutoffs = apply_sensor_metadata(flights, args.sensor_metadata_root)
     ekf = DifferentiableESKF(gravity=args.gravity).to(args.device)
     wrapper = load_airimu(args.config, args.ckpt, ekf, args.device) if args.ckpt else None
     if wrapper:

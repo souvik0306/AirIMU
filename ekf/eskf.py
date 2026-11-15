@@ -395,12 +395,3 @@ class DifferentiableESKF(nn.Module):
 
     def forward(self, *args, **kwargs):
         return self.run_sequence(*args, **kwargs)
-
-
-def run_ekf_sequence(imu, imu_time, imu_variance, vicon_events, cutoff_timestamp,
-                     initial_state, initial_covariance, *, ekf=None):
-    """Convenience entry point; pass ekf to select gravity and fusion channels."""
-    if ekf is None:
-        ekf = DifferentiableESKF().to(initial_covariance.device)
-    return ekf.run_sequence(imu, imu_time, imu_variance, vicon_events,
-                            cutoff_timestamp, initial_state, initial_covariance)

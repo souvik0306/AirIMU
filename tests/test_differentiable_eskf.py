@@ -9,7 +9,7 @@ from dataclasses import fields, replace
 import torch
 
 from ekf import (AirIMUESKF, DifferentiableESKF, EKFState, ViconEvent,
-                 horizontal_velocity_loss, run_ekf_sequence, velocity_evaluation_mask)
+                 horizontal_velocity_loss, velocity_evaluation_mask)
 from ekf.eskf import (quaternion_exp, quaternion_matrix, quaternion_multiply,
                       quaternion_yaw, right_jacobian)
 
@@ -213,8 +213,10 @@ class SequenceTests(unittest.TestCase):
         self.ekf, self.state, self.P, self.time, self.imu, self.events = fixture()
 
     def run_filter(self, variance, events=None, cutoff=1.):
-        return run_ekf_sequence(self.imu, self.time, variance,
-            self.events if events is None else events, cutoff, self.state, self.P, ekf=self.ekf)
+        return self.ekf.run_sequence(
+            self.imu, self.time, variance,
+            self.events if events is None else events, cutoff, self.state, self.P,
+        )
 
     def objective(self, variance):
         result = self.run_filter(variance)

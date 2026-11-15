@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from .training import AirIMUESKF
+from .training import AirIMUESKF, horizontal_velocity_residual
 
 
 def load_airimu(config_path, checkpoint_path, ekf, device):
@@ -33,8 +33,8 @@ def save_checkpoint(path, wrapper, optimizer, epoch, validation_mse, metadata):
 
 
 def xy_metrics(velocity, ground_truth, mask):
-    error = velocity[mask, :2] - ground_truth[mask, :2]
-    return {"xy_mse": float(error.square().sum(-1).mean()),
-            "xy_rmse": math.sqrt(float(error.square().sum(-1).mean())),
+    error = horizontal_velocity_residual(velocity, ground_truth, mask)
+    xy_mse = float(error.square().sum(-1).mean())
+    return {"xy_mse": xy_mse, "xy_rmse": math.sqrt(xy_mse),
             "x_rmse": math.sqrt(float(error[:, 0].square().mean())),
             "y_rmse": math.sqrt(float(error[:, 1].square().mean()))}

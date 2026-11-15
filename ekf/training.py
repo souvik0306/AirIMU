@@ -6,8 +6,8 @@ from torch import nn
 from .eskf import DifferentiableESKF
 
 
-def horizontal_velocity_loss(velocity_est, vicon_velocity_gt, evaluation_mask):
-    """Mean squared horizontal speed-vector error (sum xy, then mean time)."""
+def horizontal_velocity_residual(velocity_est, vicon_velocity_gt, evaluation_mask):
+    """Validate and select the horizontal velocity error used by loss and metrics."""
     if (velocity_est.ndim != 2 or velocity_est.shape[-1] != 3
             or vicon_velocity_gt.shape != velocity_est.shape):
         raise ValueError("Estimated and ground-truth velocity must both have shape [N,3].")
@@ -18,6 +18,14 @@ def horizontal_velocity_loss(velocity_est, vicon_velocity_gt, evaluation_mask):
     residual = velocity_est[evaluation_mask, :2] - vicon_velocity_gt[evaluation_mask, :2]
     if not bool(torch.isfinite(residual).all()):
         raise ValueError("Evaluation velocities must be finite.")
+    return residual
+
+
+def horizontal_velocity_loss(velocity_est, vicon_velocity_gt, evaluation_mask):
+    """Mean squared horizontal speed-vector error (sum xy, then mean time)."""
+    residual = horizontal_velocity_residual(
+        velocity_est, vicon_velocity_gt, evaluation_mask
+    )
     return residual.square().sum(dim=-1).mean()
 
 

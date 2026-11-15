@@ -9,7 +9,7 @@ import random
 import torch
 
 from ekf import DifferentiableESKF
-from ekf.data import load_flight_metadata, prepare_flight, read_dataset_flights
+from ekf.data import apply_sensor_metadata, prepare_flight, read_dataset_flights
 from ekf.experiment import load_airimu, save_checkpoint
 
 
@@ -35,7 +35,7 @@ def main():
     torch.set_num_threads(args.cpu_threads)
     torch.manual_seed(args.seed)
     rng = random.Random(args.seed)
-    flights, cutoffs = load_flight_metadata(
+    flights, cutoffs = apply_sensor_metadata(
         read_dataset_flights(args.dataset_config), args.sensor_metadata_root
     )
     training = [record for record in flights if record["split"] == "train"]
