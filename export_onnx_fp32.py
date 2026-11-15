@@ -31,7 +31,10 @@ Note: User must add 9 synthetic padding frames before calling ONNX model.
       Covariance outputs are zeros if model was not trained with propcov=True.
 """
 import argparse
+import json
+import os
 import torch
+import wandb
 from pyhocon import ConfigFactory
 from model import net_dict
 
@@ -281,6 +284,67 @@ def export(config: str, ckpt: str, onnx_path: str, torch_path: str,
     print("="*70)
 
 
+def upload_onnx_artifact(
+    onnx_path: str,
+    ckpt_path: str,
+    config_path: str,
+    opset: int,
+    num_imu_frames: int,
+    metadata_path: str,
+) -> bool:
+    """Attach an exported ONNX model to the W&B run that trained it."""
+    if not os.path.isfile(metadata_path):
+        print(
+            "W&B run metadata was not found; skipping ONNX upload: "
+            f"{metadata_path}"
+        )
+        return False
+    if not os.path.isfile(onnx_path):
+        raise FileNotFoundError(f"Cannot upload missing ONNX model: {onnx_path}")
+
+    with open(metadata_path, "r") as handle:
+        run_metadata = json.load(handle)
+    for required_key in ("id", "project"):
+        if not run_metadata.get(required_key):
+            raise ValueError(
+                f"W&B metadata {metadata_path} has no {required_key!r}."
+            )
+
+    init_kwargs = {
+        "project": run_metadata["project"],
+        "id": run_metadata["id"],
+        "resume": "must",
+    }
+    if run_metadata.get("entity"):
+        init_kwargs["entity"] = run_metadata["entity"]
+
+    run = wandb.init(**init_kwargs)
+    try:
+        artifact_name = f"{run.name or run.id}-onnx-model"
+        artifact = wandb.Artifact(
+            name=artifact_name,
+            type="model",
+            description="FP32 ONNX export of the best AirIMU checkpoint",
+            metadata={
+                "format": "ONNX",
+                "precision": "float32",
+                "opset": opset,
+                "num_imu_frames": num_imu_frames,
+                "source_checkpoint": os.path.basename(ckpt_path),
+                "config": config_path,
+            },
+        )
+        artifact.add_file(onnx_path, name=os.path.basename(onnx_path))
+        run.log_artifact(artifact, aliases=["latest", "onnx"])
+        print(
+            f"✓ Uploaded ONNX model to W&B run "
+            f"{run.entity}/{run.project}/{run.id} as {artifact_name}"
+        )
+    finally:
+        wandb.finish()
+    return True
+
+
 def main() -> None:
     """
     Export AirIMU model to ONNX format.
@@ -318,6 +382,19 @@ def main() -> None:
                         type=int,
                         default=1,
                         help="Number of real IMU frames to process (padding added automatically)")
+    parser.add_argument(
+        "--wandb-run-metadata",
+        default=None,
+        help=(
+            "Path to wandb_run.json from training. By default, use the file "
+            "beside the exported ONNX model."
+        ),
+    )
+    parser.add_argument(
+        "--no-wandb-upload",
+        action="store_true",
+        help="Export locally without uploading the ONNX artifact to W&B.",
+    )
     
     args = parser.parse_args()
     
@@ -333,6 +410,21 @@ def main() -> None:
     print("="*70 + "\n")
 
     export(args.config, args.ckpt, args.onnx, args.torch, args.opset, args.num_imu_frames)
+
+    if not args.no_wandb_upload:
+        metadata_path = args.wandb_run_metadata
+        if metadata_path is None:
+            metadata_path = os.path.join(
+                os.path.dirname(os.path.abspath(args.onnx)), "wandb_run.json"
+            )
+        upload_onnx_artifact(
+            onnx_path=args.onnx,
+            ckpt_path=args.ckpt,
+            config_path=args.config,
+            opset=args.opset,
+            num_imu_frames=args.num_imu_frames,
+            metadata_path=metadata_path,
+        )
 
 
 if __name__ == "__main__":

@@ -179,6 +179,8 @@ def visualize_velocity_with_model_uncertainty(
     dt,
     save_folder,
     mask=None,
+    acc_cov_max=None,
+    gyro_cov_max=None,
 ):
     gt_vel = gt_vel.detach().cpu().numpy() if torch.is_tensor(gt_vel) else np.asarray(gt_vel)
     air_vel = air_vel.detach().cpu().numpy() if torch.is_tensor(air_vel) else np.asarray(air_vel)
@@ -195,11 +197,22 @@ def visualize_velocity_with_model_uncertainty(
     if acc_cov.ndim != 2 or gyro_cov.ndim != 2 or acc_cov.shape[1] != 3 or gyro_cov.shape[1] != 3:
         raise ValueError("Expected acc_cov and gyro_cov to have shape [N, 3] or [1, N, 3].")
 
-    seq_len = min(gt_vel.shape[0], air_vel.shape[0], acc_cov.shape[0], gyro_cov.shape[0])
+    # Model outputs are diagonal variances. Standard deviation is easier to
+    # interpret and has the same physical units as the underlying sensors.
+    acc_std = np.sqrt(np.clip(acc_cov, a_min=0.0, a_max=None))
+    gyro_std = np.sqrt(np.clip(gyro_cov, a_min=0.0, a_max=None))
+    acc_cov_max = 0.35 ** 2 if acc_cov_max is None else float(acc_cov_max)
+    gyro_cov_max = 0.015 ** 2 if gyro_cov_max is None else float(gyro_cov_max)
+    if acc_cov_max < 0.0 or gyro_cov_max < 0.0:
+        raise ValueError("Covariance ceilings must be non-negative variances.")
+    acc_std_max = np.sqrt(acc_cov_max)
+    gyro_std_max = np.sqrt(gyro_cov_max)
+
+    seq_len = min(gt_vel.shape[0], air_vel.shape[0], acc_std.shape[0], gyro_std.shape[0])
     gt_vel = gt_vel[:seq_len]
     air_vel = air_vel[:seq_len]
-    acc_cov = acc_cov[:seq_len]
-    gyro_cov = gyro_cov[:seq_len]
+    acc_std = acc_std[:seq_len]
+    gyro_std = gyro_std[:seq_len]
 
     if dt.ndim > 1:
         dt = dt.reshape(-1)
@@ -214,8 +227,8 @@ def visualize_velocity_with_model_uncertainty(
         t = t[mask]
         gt_vel = gt_vel[mask]
         air_vel = air_vel[mask]
-        acc_cov = acc_cov[mask]
-        gyro_cov = gyro_cov[mask]
+        acc_std = acc_std[mask]
+        gyro_std = gyro_std[mask]
 
     axis_labels = ["x", "y", "z"]
     category_path = _category_dir(save_folder, save_prefix, "uncertainty")
@@ -225,14 +238,33 @@ def visualize_velocity_with_model_uncertainty(
 
         axs[0].plot(t, gt_vel[:, axis], color="mediumseagreen", linewidth=0.9, label=f"GT vel_{axis_label}")
         axs[0].plot(t, air_vel[:, axis], color="red", linewidth=0.9, label=f"AirIMU vel_{axis_label}")
-        axs[1].plot(t, acc_cov[:, axis], color="tab:orange", linewidth=0.9, label=f"acc_cov_{axis_label}")
-        axs[2].plot(t, gyro_cov[:, axis], color="tab:purple", linewidth=0.9, label=f"gyro_cov_{axis_label}")
+        axs[1].plot(t, acc_std[:, axis], color="tab:orange", linewidth=0.9, label=f"acc std_{axis_label}")
+        axs[2].plot(t, gyro_std[:, axis], color="tab:purple", linewidth=0.9, label=f"gyro std_{axis_label}")
+        axs[1].axhline(
+            acc_std_max,
+            color="red",
+            linestyle="--",
+            linewidth=2.0,
+            label=f"max std ({acc_std_max:.2e})",
+        )
+        axs[2].axhline(
+            gyro_std_max,
+            color="red",
+            linestyle="--",
+            linewidth=2.0,
+            label=f"max std ({gyro_std_max:.2e})",
+        )
 
-        axs[0].set_title(f"Velocity and Model Uncertainty Outputs ({axis_label} axis)")
+        axs[0].set_title(f"Velocity and Model Noise Standard Deviation ({axis_label} axis)")
         axs[0].set_ylabel("velocity (m/s)")
-        axs[1].set_ylabel("acc_cov output")
-        axs[2].set_ylabel("gyro_cov output")
+        axs[1].set_ylabel("acc std (m/s²)")
+        axs[2].set_ylabel("gyro std (rad/s)")
         axs[2].set_xlabel("Relative time t (s)")
+
+        for ax in axs[1:]:
+            ax.ticklabel_format(
+                axis="y", style="sci", scilimits=(0, 0), useMathText=True
+            )
 
         for ax in axs:
             ax.grid(True)

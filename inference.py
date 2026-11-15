@@ -253,6 +253,14 @@ if __name__ == '__main__':
             inference_state['dt'] = eval_dataset.dt[0]
             inference_state['raw_acc'] = eval_dataset.acc[0]  # Save raw IMU data
             inference_state['raw_gyro'] = eval_dataset.gyro[0]  # Save raw IMU data
+            # Preserve the configured variance ceilings so evaluation plots
+            # can display the corresponding maximum standard deviations.
+            inference_state['acc_cov_max'] = float(
+                conf.train.get('acc_cov_max', 0.35 ** 2)
+            )
+            inference_state['gyro_cov_max'] = float(
+                conf.train.get('gyro_cov_max', 0.015 ** 2)
+            )
             
             print(f"\n--- Pickle Output for Sequence: {path} ---")
             def print_arr(name, arr):

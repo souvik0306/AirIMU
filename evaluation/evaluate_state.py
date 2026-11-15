@@ -221,6 +221,8 @@ if __name__ == '__main__':
                     dt=inference_state['dt'],
                     save_folder=folder,
                     mask=mask,
+                    acc_cov_max=inference_state.get('acc_cov_max', 0.35 ** 2),
+                    gyro_cov_max=inference_state.get('gyro_cov_max', 0.015 ** 2),
                 )
             visualize_rotations(
                 save_prefix,
