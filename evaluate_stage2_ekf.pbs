@@ -5,7 +5,9 @@
 #PBS -l walltime=04:00:00
 #PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
 
-# Evaluate the saved Stage 2 checkpoint without repeating training.
+# Generate the same inference and evaluation plots as airimu_scratch.pbs
+# using the saved Stage 2 checkpoint.
+# Submit with: qsub evaluate_stage2_ekf.pbs
 # Override STAGE2_RUN_ROOT, STAGE2_EVAL_OUTPUT, or EKF_EVAL_DEVICE with qsub -v.
 set -euo pipefail
 cd "$PBS_O_WORKDIR"
@@ -13,23 +15,48 @@ module load apptainer/1.4.1
 
 image=/app1/common/singularity-img/vanda/pytorch_2.5_cuda_12.4_unsloth.sif
 run_root=${STAGE2_RUN_ROOT:-experiments/20261115_184615_SGT_job1558928/joint_ekf}
-output=${STAGE2_EVAL_OUTPUT:-$run_root/evaluation_stage2}
+stage2_exp="$run_root/airimu_stage2"
+output=${STAGE2_EVAL_OUTPUT:-$stage2_exp/evaluation_results}
 device=${EKF_EVAL_DEVICE:-cuda:0}
 config=${EKF_CONFIG:-configs/exp/TLab/4th_Nov_Scratch_stage2.conf}
-checkpoint="$run_root/airimu_stage2/ckpt/best_model.ckpt"
-[[ -f "$checkpoint" ]] || { echo "Missing checkpoint: $checkpoint" >&2; exit 2; }
+dataset_config=${EKF_DATASET_CONFIG:-configs/datasets/TLab/tlab_body.conf}
+checkpoint="$stage2_exp/ckpt/best_model.ckpt"
+for required_file in "$config" "$dataset_config" "$checkpoint"; do
+    if [[ ! -f "$required_file" ]]; then
+        echo "ERROR: required file not found: $required_file" >&2
+        exit 2
+    fi
+done
 
 echo "Stage 2 checkpoint: $checkpoint"
+echo "Inference output: $stage2_exp/net_output.pickle"
 echo "Evaluation output: $output"
 echo "Compute node: $(hostname); device: $device"
-runner=(-m evaluation.evaluate_eskf)
-if [[ -f "$output/source/run_evaluation.py" ]]; then
-    runner=("$output/source/run_evaluation.py")
-    echo "Using preserved baseline source: $output/source"
+
+echo "Running Stage 2 inference for the configured inference trajectories"
+apptainer exec --nv -e "$image" \
+python3 -u inference.py \
+    --config "$config" \
+    --exp_dir "$stage2_exp" \
+    --device "$device"
+
+if [[ ! -s "$stage2_exp/net_output.pickle" ]]; then
+    echo "ERROR: Stage 2 inference completed without net_output.pickle" >&2
+    exit 3
 fi
-apptainer exec --nv -e "$image" python3 -u "${runner[@]}" \
-    --config "$config" --ckpt "$checkpoint" \
-    --dataset-config "${EKF_DATASET_CONFIG:-configs/datasets/TLab/tlab_body.conf}" \
-    --sensor-metadata-root "${SENSOR_METADATA_ROOT:-initial_sensor_biases}" \
-    --output "$output" --split test --device "$device" --cpu-threads 1
-echo "Stage 2 evaluation finished: $output"
+
+echo "Generating Stage 2 evaluation metrics and plots"
+apptainer exec -e --env MPLBACKEND=Agg "$image" \
+python3 -u evaluation/evaluate_state.py \
+    --device cpu \
+    --dataconf "$dataset_config" \
+    --exp "$stage2_exp" \
+    --savedir "$output"
+
+for result in "$output/loss_result.json" "$output/summary/ave_raw_vs_airimu.png"; do
+    if [[ ! -s "$result" ]]; then
+        echo "ERROR: Stage 2 evaluation completed without expected result: $result" >&2
+        exit 4
+    fi
+done
+echo "Stage 2 evaluation plots and metrics finished: $output"
