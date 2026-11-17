@@ -99,8 +99,7 @@ if __name__ == '__main__':
     Load the pretrained model
     '''
     network = net_dict[conf.train.network](conf.train).to(args.device).double()
-    save_folder = os.path.join(conf.general.exp_dir, "evaluate")
-    os.makedirs(save_folder, exist_ok=True)
+    os.makedirs(conf.general.exp_dir, exist_ok=True)
 
     if args.load is None:
         ckpt_path = os.path.join(conf.general.exp_dir, "ckpt/best_model.ckpt")

@@ -101,7 +101,7 @@ if __name__ == '__main__':
     network = net_dict[conf.train.network](conf.train).to(args.device).double()
 
     save_folder = os.path.join(conf.general.exp_dir, "evaluate")
-    os.makedirs(save_folder, exist_ok=True)
+    os.makedirs(conf.general.exp_dir, exist_ok=True)
 
     if args.load is None:
         ckpt_path = os.path.join(conf.general.exp_dir, "ckpt/best_model.ckpt")
@@ -154,7 +154,9 @@ if __name__ == '__main__':
             title = "$SO(3)$ orientation error"
             if 'correction_acc' in eval_state['evaluate'].keys():
                 correction = torch.cat((eval_state['evaluate']['correction_acc'][0], eval_state['evaluate']['correction_gyro'][0]), dim=-1)
-                vis_corrections(correction.cpu(), save_folder=os.path.join(save_folder, path))
+                correction_prefix = os.path.join(save_folder, path)
+                os.makedirs(os.path.dirname(correction_prefix), exist_ok=True)
+                vis_corrections(correction.cpu(), save_folder=correction_prefix)
 
             all_metrics[path] = get_metrics(eval_state)
         

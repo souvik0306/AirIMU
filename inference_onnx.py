@@ -260,8 +260,7 @@ if __name__ == '__main__':
             print("✓ PyTorch model loaded (for ONNX comparison)")
     
     # Setup output directory
-    save_folder = os.path.join(conf.general.exp_dir, "evaluate")
-    os.makedirs(save_folder, exist_ok=True)
+    os.makedirs(conf.general.exp_dir, exist_ok=True)
 
     # Get collate function (handles padding)
     if 'collate' in conf.dataset.keys():
