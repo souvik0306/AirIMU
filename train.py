@@ -356,7 +356,8 @@ def save_ckpt(
 
     if save_best:
         save_best_ckpt(
-            network, optimizer, scheduler, epoch_i, test_loss, conf
+            network, optimizer, scheduler, epoch_i, test_loss, conf,
+            extra_state=extra_state,
         )
 
     torch.save(

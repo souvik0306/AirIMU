@@ -134,12 +134,33 @@ def load_resume_state(network, optimizer, scheduler, ckpt_path, device):
     return epoch, best_loss, checkpoint.get("best_cov_nll", float("inf"))
 
 
-NLL_KEYS = ("rot_nll", "vel_nll", "cov_nll")
-
-
-def extract_nll_metrics(test_loss):
-    """Reuse NLL metrics already accumulated by the normal test pass."""
-    return {key: test_loss[key] for key in NLL_KEYS}
+def save_stage2_covariance_checkpoint(
+    network, optimizer, scheduler, epoch_i, conf, *,
+    best_loss, best_cov_nll, cov_nll, vel_rmse,
+):
+    """Keep the lowest validation joint NLL independently of the velocity guard."""
+    if not np.isfinite(cov_nll) or cov_nll >= best_cov_nll:
+        return best_cov_nll
+    velocity_limit = conf.train.stage1_vel_ref * (1.0 + conf.train.vel_degradation_limit)
+    save_best_ckpt(
+        network, optimizer, scheduler, epoch_i, cov_nll, conf,
+        checkpoint_name="best_covariance_model.ckpt",
+        metric_name="cov_nll_9x9",
+        extra_state={
+            # Preserve the combined-loss tracker when resuming from this
+            # checkpoint; metric_value records its independent NLL criterion.
+            "best_loss": best_loss,
+            "best_cov_nll": cov_nll,
+            "validation_vel_rmse": vel_rmse,
+            "velocity_guard_passed": vel_rmse <= velocity_limit,
+        },
+    )
+    print(
+        "Saved best Stage 2 covariance model: "
+        f"cov_nll_9x9 = {cov_nll:.6f}, vel_rmse = {vel_rmse:.6f}, "
+        f"velocity_guard_passed = {vel_rmse <= velocity_limit}"
+    )
+    return cov_nll
 
 
 def configure_stage2_initial_biases(conf):
@@ -165,7 +186,6 @@ def configure_stage2_initial_biases(conf):
         f"resolved {sum(counts.values())} flights from {bias_root} "
         f"(train={counts['train']}, test={counts['test']}, eval={counts['eval']})."
     )
-
 
 
 def build_loader(
@@ -386,7 +406,6 @@ if __name__ == "__main__":
         min_lr=conf.train.min_lr,
     )
     best_vel_rmse = float("inf")
-    best_cov_nll = float("inf")
     epoch = 0
     resumed = False
     pretrained_loaded = False
@@ -396,6 +415,7 @@ if __name__ == "__main__":
     covariance_heads_initialized = True
     if is_stage2:
         best_loss = float("inf")
+        best_cov_nll = float("inf")
         vel_limit = conf.train.stage1_vel_ref * (1.0 + conf.train.vel_degradation_limit)
     else:
         rot_limit = conf.train.rot_limit if "rot_limit" in conf.train else float("inf")
@@ -410,9 +430,9 @@ if __name__ == "__main__":
             epoch = loaded_epoch + 1
             if is_stage2:
                 best_loss = loaded_best
+                best_cov_nll = loaded_best_cov_nll
             else:
                 best_vel_rmse = loaded_best
-                best_cov_nll = loaded_best_cov_nll
                 # A checkpoint from before epoch 9 has never trained its
                 # covariance heads. Re-seed them once at activation; never
                 # reset a checkpoint that has already entered covariance
@@ -468,11 +488,18 @@ if __name__ == "__main__":
     )
 
     if is_stage2:
-        initial_nll = extract_nll_metrics(initial_test_loss)
+        initial_cov_nll = initial_test_loss['cov_nll']
         initial_vel_rmse = initial_eval_state['loss']['vel'].mean().item()
         initial_loss = initial_test_loss['loss']
-        if initial_vel_rmse <= vel_limit and initial_loss < best_loss:
+        save_initial_best = initial_vel_rmse <= vel_limit and initial_loss < best_loss
+        if save_initial_best:
             best_loss = initial_loss
+        best_cov_nll = save_stage2_covariance_checkpoint(
+            network, optimizer, scheduler, epoch - 1, conf,
+            best_loss=best_loss, best_cov_nll=best_cov_nll,
+            cov_nll=initial_cov_nll, vel_rmse=initial_vel_rmse,
+        )
+        if save_initial_best:
             save_best_ckpt(
                 network,
                 optimizer,
@@ -480,15 +507,16 @@ if __name__ == "__main__":
                 epoch - 1,
                 best_loss,
                 conf,
+                extra_state={"best_cov_nll": best_cov_nll},
             )
             print(
                 "Saved eligible Stage 2 baseline as best model: "
-                "vel_rmse = %.6f, loss = %.6f, vel_nll = %.6f"
-                % (initial_vel_rmse, initial_loss, initial_nll["vel_nll"])
+                "vel_rmse = %.6f, loss = %.6f, cov_nll_9x9 = %.6f"
+                % (initial_vel_rmse, initial_loss, initial_cov_nll)
             )
         print(
-            "Stage 2 baseline: vel_rmse = %.6f, loss = %.6f, vel_nll = %.6f"
-            % (initial_vel_rmse, initial_loss, initial_nll["vel_nll"])
+            "Stage 2 baseline: vel_rmse = %.6f, loss = %.6f, cov_nll_9x9 = %.6f"
+            % (initial_vel_rmse, initial_loss, initial_cov_nll)
         )
 
     for epoch_i in range(epoch, conf.train.max_epoches):
@@ -522,22 +550,28 @@ if __name__ == "__main__":
             }, log_step, args.log)
 
         if is_stage2:
-            nll_metrics = extract_nll_metrics(test_loss)
             val_vel_rmse = eval_state['loss']['vel'].mean().item()
-            vel_nll = nll_metrics["vel_nll"]
-            cov_nll = nll_metrics["cov_nll"]
+            cov_nll = test_loss['cov_nll']
             scheduler.step(test_loss['loss'])
             if test_loss['loss'] < best_loss and val_vel_rmse <= vel_limit:
                 best_loss = test_loss['loss']
                 save_best = True
                 print(
                     "Saving best Stage 2 model: "
-                    "vel_rmse = %.6f, loss = %.6f, vel_nll = %.6f, cov_nll = %.6f"
-                    % (val_vel_rmse, best_loss, vel_nll, cov_nll)
+                    "vel_rmse = %.6f, loss = %.6f, cov_nll_9x9 = %.6f"
+                    % (val_vel_rmse, best_loss, cov_nll)
                 )
             else:
                 save_best = False
-            save_ckpt(network, optimizer, scheduler, epoch_i, best_loss, conf, save_best=save_best)
+            best_cov_nll = save_stage2_covariance_checkpoint(
+                network, optimizer, scheduler, epoch_i, conf,
+                best_loss=best_loss, best_cov_nll=best_cov_nll,
+                cov_nll=cov_nll, vel_rmse=val_vel_rmse,
+            )
+            save_ckpt(
+                network, optimizer, scheduler, epoch_i, best_loss, conf,
+                save_best=save_best, extra_state={"best_cov_nll": best_cov_nll},
+            )
         else:
             if eval_state is not None:
                 val_vel_rmse = eval_state['loss']['vel'].mean().item()
@@ -572,28 +606,6 @@ if __name__ == "__main__":
                     extra_state={"best_corrected_vel_rmse": best_vel_rmse},
                 )
 
-            if conf.train.propcov:
-                val_cov_nll = test_loss['corrected_cov_nll']
-                if val_cov_nll < best_cov_nll:
-                    best_cov_nll = val_cov_nll
-                    print(
-                        "Saving best calibrated Stage 1 model: "
-                        "corrected_cov_nll = %.6f" % best_cov_nll
-                    )
-                    save_best_ckpt(
-                        network, optimizer, scheduler, epoch_i, best_cov_nll, conf,
-                        checkpoint_name="best_covariance_model.ckpt",
-                        metric_name="corrected_cov_nll",
-                        extra_state={
-                            # Stage 2's velocity guard still needs the best
-                            # corrected-trajectory reference even when this
-                            # calibration-selected checkpoint is loaded.
-                            "best_loss": best_vel_rmse,
-                            "best_corrected_vel_rmse": best_vel_rmse,
-                            "best_cov_nll": best_cov_nll,
-                        },
-                    )
-
             save_ckpt(
                 network,
                 optimizer,
@@ -602,7 +614,6 @@ if __name__ == "__main__":
                 best_vel_rmse,
                 conf,
                 save_best=False,
-                extra_state={"best_cov_nll": best_cov_nll},
             )
 
     if args.log:
