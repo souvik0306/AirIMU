@@ -11,6 +11,7 @@ from pyhocon import HOCONConverter as conf_convert
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from datasets import SeqeuncesDataset, collate_fcs
+from datasets.initial_sensor_bias import resolve_initial_sensor_bias
 from model import net_dict
 from utils import move_to
 from train import (
@@ -138,6 +139,32 @@ NLL_KEYS = ("rot_nll", "vel_nll", "pos_nll", "cov_nll")
 def extract_nll_metrics(test_loss):
     """Reuse NLL metrics already accumulated by the normal test pass."""
     return {key: test_loss[key] for key in NLL_KEYS}
+
+
+def configure_stage2_initial_biases(conf):
+    """Resolve every flight's fixed bias before constructing Stage 2 loaders."""
+    if not conf.train.get("use_initial_sensor_bias", False):
+        return
+    bias_root = conf.train.get("initial_sensor_bias_root", None)
+    if not bias_root:
+        raise ValueError("Stage 2 initial bias subtraction requires initial_sensor_bias_root.")
+    bias_root = os.path.abspath(str(bias_root))
+    conf.train["initial_sensor_bias_root"] = bias_root
+    counts = {}
+    for split in ("train", "test", "eval"):
+        split_conf = conf.dataset[split]
+        split_conf["initial_sensor_bias_root"] = bias_root
+        counts[split] = 0
+        for data_conf in split_conf.data_list:
+            for data_name in data_conf.data_drive:
+                resolve_initial_sensor_bias(bias_root, data_conf.data_root, data_name)
+                counts[split] += 1
+    print(
+        "Stage 2 initial sensor bias subtraction: "
+        f"resolved {sum(counts.values())} flights from {bias_root} "
+        f"(train={counts['train']}, test={counts['test']}, eval={counts['eval']})."
+    )
+
 
 
 def build_loader(
@@ -277,6 +304,7 @@ if __name__ == "__main__":
         conf.train.stage1_vel_ref = resolve_stage1_vel_ref(
             conf, pretrained_override=args.pretrained_ckpt
         )
+        configure_stage2_initial_biases(conf)
     else:
         # Stage 1 starts with covariance disabled at runtime, but its shared
         # preintegrator must be constructed with covariance support so epoch 9

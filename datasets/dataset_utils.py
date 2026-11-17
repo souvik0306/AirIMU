@@ -42,7 +42,15 @@ def custom_collate(data):
     init_rot = torch.stack([d['init_rot'] for d in data])
     init_vel = torch.stack([d['init_vel'] for d in data])
 
-    return  {'dt': dt, 'acc': acc, 'gyro': gyro, 'rot':rot,}, \
+    input_data = {'dt': dt, 'acc': acc, 'gyro': gyro, 'rot': rot}
+    for key in ('initial_acc_bias', 'initial_gyro_bias'):
+        present = [key in item for item in data]
+        if any(present):
+            if not all(present):
+                raise ValueError(f"A batch has missing {key} values.")
+            input_data[key] = torch.stack([item[key] for item in data])
+
+    return  input_data, \
             {'pos': init_pos, 'vel': init_vel, 'rot': init_rot,}, \
             {'gt_pos': gt_pos, 'gt_vel': gt_vel, 'gt_rot': gt_rot, }
 

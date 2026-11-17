@@ -163,6 +163,19 @@ class CodeNet(ModelBase):
 
         return torch.cat([acc, gyro], dim = -1)
 
+    def bias_correct_raw_imu(self, data):
+        """Subtract fixed per-flight biases after skipping synthetic CNN context."""
+        expected_shape = (data['acc'].shape[0], 3)
+        for key in ('initial_acc_bias', 'initial_gyro_bias'):
+            if key not in data:
+                raise KeyError(f"Stage 2 initial bias subtraction requires {key}.")
+            if tuple(data[key].shape) != expected_shape:
+                raise ValueError(f"{key} must have shape {expected_shape}, got {tuple(data[key].shape)}.")
+        return (
+            data['acc'][:, self.interval:, :] - data['initial_acc_bias'][:, None, :],
+            data['gyro'][:, self.interval:, :] - data['initial_gyro_bias'][:, None, :],
+        )
+
     def _update(self, to_update, feat, frame_len):
         """Scatter corrections over the original sequence length.
 
@@ -294,21 +307,22 @@ class CodeNet(ModelBase):
             result['gyro_cov'] = inference_state['cov_state']['gyro_cov']
 
         if self.conf.propcov and is_stage2:
-            # Covariance must be supervised against the *raw* (uncorrected) IMU
-            # drift, not the corrected signal: deployment feeds raw acc/gyro plus
-            # this learned covariance straight into the EKF, never the correction
-            # itself, so the covariance has to characterize the error the EKF will
-            # actually see. The bias-correction knowledge instead reaches the
-            # covariance heads through cov_decoder's acc/gyro_bias_gain (see
-            # inference()), which conditions the predicted variance on the
-            # detected bias magnitude without altering what's fed downstream.
+            # Supervise covariance against raw IMU after subtracting the flight's
+            # fixed EKF2 initial bias when enabled. Learned AirIMU corrections
+            # are excluded from this target. The encoder still sees raw IMU;
+            # its detected corrections condition cov_decoder via the bias gains.
             # use_gtrot=False (own rotation estimate, no ground-truth gravity
             # compensation) matches the deployment condition (gtrot is forced off
             # in export/inference), so the calibrated uncertainty stays valid
             # outside of training.
             raw_data = dict(data)
-            raw_data['corrected_acc'] = data['acc'][:, self.interval:, :]
-            raw_data['corrected_gyro'] = data['gyro'][:, self.interval:, :]
+            if self.conf.get('use_initial_sensor_bias', False):
+                raw_acc, raw_gyro = self.bias_correct_raw_imu(data)
+            else:
+                raw_acc = data['acc'][:, self.interval:, :]
+                raw_gyro = data['gyro'][:, self.interval:, :]
+            raw_data['corrected_acc'] = raw_acc
+            raw_data['corrected_gyro'] = raw_gyro
             raw_state = self.integrate(
                 init_state=init_state,
                 data=raw_data,
