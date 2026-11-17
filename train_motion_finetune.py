@@ -21,6 +21,7 @@ from train import (
     save_best_ckpt,
     save_ckpt,
     write_wandb,
+    report_metrics,
     upload_best_ckpt_artifact,
 )
 
@@ -133,7 +134,7 @@ def load_resume_state(network, optimizer, scheduler, ckpt_path, device):
     return epoch, best_loss, checkpoint.get("best_cov_nll", float("inf"))
 
 
-NLL_KEYS = ("rot_nll", "vel_nll", "pos_nll", "cov_nll")
+NLL_KEYS = ("rot_nll", "vel_nll", "cov_nll")
 
 
 def extract_nll_metrics(test_loss):
@@ -202,23 +203,14 @@ def log_validation_metrics(network, test_loader, eval_loader, conf, log_enabled,
     print("test loss: %f" % (test_loss["loss"]))
     if log_enabled:
         write_wandb("test", test_loss, step)
-        corrected_metrics = {
-            key: value for key, value in test_loss.items()
-            if key.startswith("corrected_") and isinstance(value, float)
-        }
-        write_wandb("validation", corrected_metrics, step)
 
     eval_state = None
     if step % conf.train.eval_freq == conf.train.eval_freq - 1:
         eval_state = evaluate(network=network, loader=eval_loader, confs=conf.train)
-        if log_enabled:
-            write_wandb('eval/pos_rmse', eval_state['loss']['pos'].mean(), step)
-            write_wandb('eval/rot_rmse', eval_state['loss']['rot'].mean(), step)
-            write_wandb('eval/vel_rmse', eval_state['loss']['vel'].mean(), step)
-            write_wandb('eval/rot_dist', eval_state['loss']['rot_dist'].mean(), step)
-            write_wandb('eval/vel_dist', eval_state['loss']['vel_dist'].mean(), step)
-            write_wandb('eval/pos_dist', eval_state['loss']['pos_dist'].mean(), step)
-        print("eval pos: %f eval rot: %f" % (eval_state['loss']['pos'].mean(), eval_state['loss']['rot'].mean()))
+        report_metrics('eval', {
+            f'{state}_rmse': eval_state['loss'][state].mean().item()
+            for state in ('pos', 'rot', 'vel')
+        }, step, log_enabled)
 
     return test_loss, eval_state
 
@@ -498,9 +490,6 @@ if __name__ == "__main__":
             "Stage 2 baseline: vel_rmse = %.6f, loss = %.6f, vel_nll = %.6f"
             % (initial_vel_rmse, initial_loss, initial_nll["vel_nll"])
         )
-        if args.log:
-            write_wandb("monitor/vel_rmse", initial_vel_rmse, initial_step)
-            write_wandb("nll", initial_nll, initial_step)
 
     for epoch_i in range(epoch, conf.train.max_epoches):
         if not is_stage2:
@@ -525,27 +514,18 @@ if __name__ == "__main__":
 
         if args.log:
             write_wandb("train", train_loss, log_step)
-            write_wandb("lr", scheduler.optimizer.param_groups[0]["lr"], log_step)
-            if not is_stage2:
-                write_wandb(
-                    "schedule/covariance_weight_multiplier",
-                    cov_weight_multiplier,
-                    log_step,
-                )
-                write_wandb(
-                    "schedule/effective_covariance_weight",
-                    float(conf.train.cov_weight),
-                    log_step,
-                )
+        report_metrics("lr", scheduler.optimizer.param_groups[0]["lr"], log_step, args.log)
+        if not is_stage2:
+            report_metrics("schedule", {
+                "covariance_weight_multiplier": float(cov_weight_multiplier),
+                "effective_covariance_weight": float(conf.train.cov_weight),
+            }, log_step, args.log)
 
         if is_stage2:
             nll_metrics = extract_nll_metrics(test_loss)
             val_vel_rmse = eval_state['loss']['vel'].mean().item()
             vel_nll = nll_metrics["vel_nll"]
             cov_nll = nll_metrics["cov_nll"]
-            if args.log:
-                write_wandb("monitor/vel_rmse", val_vel_rmse, log_step)
-                write_wandb("nll", nll_metrics, log_step)
             scheduler.step(test_loss['loss'])
             if test_loss['loss'] < best_loss and val_vel_rmse <= vel_limit:
                 best_loss = test_loss['loss']

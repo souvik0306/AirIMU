@@ -115,9 +115,6 @@ def get_loss(inte_state, data, confs):
     vel_loss, vel_dist = loss_(loss_fc, inte_state['vel'], data['gt_vel'], sampling = confs.sampling)
     pos_loss, pos_dist = loss_(loss_fc, inte_state['pos'], data['gt_pos'], sampling = confs.sampling)
 
-    state_losses['pos'] = pos_dist[:,-1,:].norm(dim=-1).mean()
-    state_losses['rot'] = rot_dist[:,-1,:].norm(dim=-1).mean()
-    state_losses['vel'] = vel_dist[:,-1,:].norm(dim=-1).mean()
     state_losses['corrected_pos_rmse'] = rmse_from_dist(pos_dist).detach()
     state_losses['corrected_rot_rmse'] = rmse_from_dist(rot_dist).detach()
     state_losses['corrected_vel_rmse'] = rmse_from_dist(vel_dist).detach()
@@ -148,11 +145,6 @@ def get_loss(inte_state, data, confs):
 
         rot_cov = inte_state['cov'][..., :3, :3]
         vel_cov = inte_state['cov'][..., 3:6, 3:6]
-        pos_cov = inte_state['cov'][..., 6:9, 6:9]
-        cov_diag = torch.diagonal(inte_state['cov'], dim1=-2, dim2=-1)
-        cov_losses['pred_cov_rot'] = cov_diag[..., :3].mean()
-        cov_losses['pred_cov_vel'] = cov_diag[..., 3:6].mean()
-        cov_losses['pred_cov_pos'] = cov_diag[..., 6:9].mean()
 
         nll_rot_dist = cov_rot_dist if confs.get('covaug', False) else cov_rot_dist.detach()
         nll_vel_dist = cov_vel_dist if confs.get('covaug', False) else cov_vel_dist.detach()
@@ -169,13 +161,11 @@ def get_loss(inte_state, data, confs):
         with torch.no_grad():
             rot_nll = cholesky_nll(cov_rot_dist.detach(), rot_cov.detach())
             vel_nll = cholesky_nll(cov_vel_dist.detach(), vel_cov.detach())
-            pos_nll = cholesky_nll(cov_pos_dist.detach(), pos_cov.detach())
 
         if is_stage2:
             cov_losses['rot_nll'] = rot_nll
             cov_losses['vel_nll'] = vel_nll
             cov_losses['cov_nll'] = combined_cov_nll.detach()
-            cov_losses['pos_nll'] = pos_nll
             cov_losses['raw_vel_rmse'] = rmse_from_dist(cov_vel_dist).detach()
             rot_calibration_dist = cov_rot_dist.detach()
             cov_losses['rot_nees'] = compute_cholesky_nees(
@@ -197,7 +187,6 @@ def get_loss(inte_state, data, confs):
         else:
             cov_losses['corrected_rot_nll'] = rot_nll
             cov_losses['corrected_vel_nll'] = vel_nll
-            cov_losses['corrected_pos_nll'] = pos_nll
             cov_losses['corrected_cov_nll'] = combined_cov_nll.detach()
             cov_losses['corrected_vel_nees'] = compute_cholesky_nees(
                 cov_vel_dist.detach(), vel_cov
@@ -215,8 +204,6 @@ def get_loss(inte_state, data, confs):
         # multi-step drift rather than sensor noise.
         # Normalized by the desired target (not the hard ceiling) and split
         # per-sensor since drone performance is more gyro-sensitive.
-        cov_losses['acc_cov_mean'] = inte_state['acc_cov'].mean().detach()
-        cov_losses['gyro_cov_mean'] = inte_state['gyro_cov'].mean().detach()
         acc_cov_reg_weight = confs.get('acc_cov_reg_weight', confs.get('cov_reg_weight', 0.0))
         gyro_cov_reg_weight = confs.get('gyro_cov_reg_weight', confs.get('cov_reg_weight', 0.0))
         if acc_cov_reg_weight > 0 or gyro_cov_reg_weight > 0:
@@ -224,19 +211,37 @@ def get_loss(inte_state, data, confs):
             gyro_cov_target = confs.get('gyro_cov_target', 0.003 ** 2)
             acc_cov_reg_loss = (inte_state['acc_cov'] / acc_cov_target).mean()
             gyro_cov_reg_loss = (inte_state['gyro_cov'] / gyro_cov_target).mean()
-            cov_losses['acc_cov_reg'] = acc_cov_reg_loss.detach()
-            cov_losses['gyro_cov_reg'] = gyro_cov_reg_loss.detach()
 
-    loss += (confs.pos_weight * pos_loss + confs.rot_weight * rot_loss + confs.vel_weight * vel_loss)
+    loss_corrected = (
+        confs.pos_weight * pos_loss
+        + confs.rot_weight * rot_loss
+        + confs.vel_weight * vel_loss
+    )
+    loss_covariance = loss_corrected.new_zeros(())
+    loss_variance_reg = loss_corrected.new_zeros(())
+    loss = loss_corrected
     if confs.propcov:
-        loss += confs.cov_weight * combined_cov_nll
+        loss_covariance = confs.cov_weight * combined_cov_nll
+        # Keep each contribution independent: in-place additions here would
+        # also modify loss_corrected and corrupt its gradient diagnostic.
+        loss = loss + loss_covariance
         if acc_cov_reg_weight > 0:
-            loss += acc_cov_reg_weight * acc_cov_reg_loss
+            acc_variance_reg = acc_cov_reg_weight * acc_cov_reg_loss
+            loss_variance_reg = loss_variance_reg + acc_variance_reg
+            loss = loss + acc_variance_reg
         if gyro_cov_reg_weight > 0:
-            loss += gyro_cov_reg_weight * gyro_cov_reg_loss
+            gyro_variance_reg = gyro_cov_reg_weight * gyro_cov_reg_loss
+            loss_variance_reg = loss_variance_reg + gyro_variance_reg
+            loss = loss + gyro_variance_reg
     # report_hasNan(loss)
 
-    return {'loss':loss, **state_losses, **cov_losses}
+    return {
+        'loss': loss,
+        'loss_corrected': loss_corrected,
+        'loss_covariance': loss_covariance,
+        'loss_variance_reg': loss_variance_reg,
+        **state_losses, **cov_losses,
+    }
 
 
 def get_RMSE(inte_state, data):

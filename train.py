@@ -18,10 +18,56 @@ from model.losses import get_loss
 from eval import evaluate
 
 
+WEIGHTED_LOSS_KEYS = ('loss_corrected', 'loss_covariance', 'loss_variance_reg')
+ENCODER_GRADIENT_KEYS = ('encoder_grad_norm_corrected', 'encoder_grad_norm_covariance')
 STAGE2_CALIBRATION_KEYS = (
     'rot_nees', 'rot_1sigma_coverage', 'vel_nees',
     'vel_1sigma_coverage', 'vel_2sigma_coverage',
 )
+WANDB_PHASE_METRIC_KEYS = frozenset({
+    'loss', *WEIGHTED_LOSS_KEYS, *ENCODER_GRADIENT_KEYS,
+    'corrected_pos_rmse', 'corrected_rot_rmse', 'corrected_vel_rmse', 'raw_vel_rmse',
+    'rot_nll', 'vel_nll', 'cov_nll',
+    'corrected_rot_nll', 'corrected_vel_nll', 'corrected_cov_nll',
+    *STAGE2_CALIBRATION_KEYS,
+    # Stage 1 uses these names for corrected-trajectory calibration.
+    'corrected_vel_nees', 'corrected_vel_1sigma', 'corrected_vel_2sigma',
+    *(f'outputs/{sensor}_noise_std/std/{axis}'
+      for sensor in ('gyro', 'acc') for axis in 'xy'),
+})
+
+
+def shared_encoder_gradient_norm(loss, parameters):
+    """Global L2 norm from one weighted loss, without accumulating .grad."""
+    if not parameters or not loss.requires_grad:
+        return loss.detach().new_zeros(())
+    gradients = torch.autograd.grad(
+        loss, parameters, retain_graph=True, allow_unused=True,
+    )
+    norms = [torch.linalg.vector_norm(gradient.detach().double())
+             for gradient in gradients if gradient is not None]
+    if not norms:
+        return loss.detach().new_zeros(())
+    return torch.linalg.vector_norm(torch.stack(norms))
+
+
+def print_weighted_loss_contributions(context, values):
+    tqdm.tqdm.write(
+        f"{context} weighted loss contributions: "
+        f"loss_corrected={values['loss_corrected']:.6e}, "
+        f"loss_covariance={values['loss_covariance']:.6e}, "
+        f"loss_variance_reg={values['loss_variance_reg']:.6e}, "
+        f"loss={values['loss']:.6e}"
+    )
+
+
+def print_stage2_calibration_metrics(context, metrics):
+    values = ', '.join(f'{key}={metrics[key]:.6f}' for key in STAGE2_CALIBRATION_KEYS)
+    tqdm.tqdm.write(
+        f"{context} covariance calibration: "
+        f"rot_nll={metrics['rot_nll']:.6e}, vel_nll={metrics['vel_nll']:.6e}, "
+        f"cov_nll={metrics['cov_nll']:.6e} (9x9), {values}"
+    )
 
 
 class _LossMetrics:
@@ -29,15 +75,14 @@ class _LossMetrics:
 
     def __init__(self, propcov, uncertainty_keys=()):
         self.sources = {
-            'loss': 'loss', 'pos_loss': 'pos', 'rot_loss': 'rot', 'vel_loss': 'vel',
+            'loss': 'loss',
             'corrected_pos_rmse': 'corrected_pos_rmse',
             'corrected_rot_rmse': 'corrected_rot_rmse',
             'corrected_vel_rmse': 'corrected_vel_rmse',
+            **{key: key for key in WEIGHTED_LOSS_KEYS},
         }
         if propcov:
-            self.sources.update({key: key for key in (
-                'pred_cov_rot', 'pred_cov_vel', 'pred_cov_pos', *uncertainty_keys,
-            )})
+            self.sources.update({key: key for key in uncertainty_keys})
         self.total = None
         self.count = 0
 
@@ -53,43 +98,7 @@ class _LossMetrics:
 
     def averages(self):
         values = (self.total / self.count).cpu().tolist()
-        result = dict(zip(self.sources, values))
-        for key in ('pred_cov_rot', 'pred_cov_vel', 'pred_cov_pos'):
-            result.setdefault(key, 0.0)
-        return result
-
-
-def print_corrected_calibration_metrics(split, metrics, propcov):
-    """Print Stage 1 trajectory and calibration metrics to the job log."""
-    print(
-        f"{split} corrected trajectory metrics: "
-        f"pos_rmse={metrics['corrected_pos_rmse']:.6f}, "
-        f"vel_rmse={metrics['corrected_vel_rmse']:.6f}, "
-        f"rot_rmse={metrics['corrected_rot_rmse']:.6f}"
-    )
-    if not propcov:
-        print(f"{split} corrected covariance metrics: disabled by epoch schedule")
-        return
-
-    corrected_covariance_keys = (
-        'corrected_pos_nll', 'corrected_vel_nll', 'corrected_rot_nll',
-        'corrected_cov_nll', 'corrected_vel_nees', 'corrected_vel_1sigma',
-        'corrected_vel_2sigma',
-    )
-    if not all(key in metrics for key in corrected_covariance_keys):
-        # Stage 2 retains its existing raw-covariance metric names.
-        return
-
-    print(
-        f"{split} corrected covariance metrics: "
-        f"pos_nll={metrics['corrected_pos_nll']:.6f}, "
-        f"vel_nll={metrics['corrected_vel_nll']:.6f}, "
-        f"rot_nll={metrics['corrected_rot_nll']:.6f}, "
-        f"full_nll={metrics['corrected_cov_nll']:.6f}, "
-        f"vel_nees={metrics['corrected_vel_nees']:.6f}, "
-        f"vel_1sigma={metrics['corrected_vel_1sigma']:.6f}, "
-        f"vel_2sigma={metrics['corrected_vel_2sigma']:.6f}"
-    )
+        return dict(zip(self.sources, values))
 
 
 def train(network, loader, confs, epoch, optimizer):
@@ -102,13 +111,22 @@ def train(network, loader, confs, epoch, optimizer):
         )
     else:
         uncertainty_keys = (
-            'corrected_pos_nll', 'corrected_vel_nll', 'corrected_rot_nll',
+            'corrected_rot_nll', 'corrected_vel_nll',
             'corrected_cov_nll', 'corrected_vel_nees',
             'corrected_vel_1sigma', 'corrected_vel_2sigma',
         )
     metrics = _LossMetrics(confs.propcov, uncertainty_keys)
     output_metrics = OutputMetrics()
     log_interval = max(1, int(confs.get('log_interval', 10)))
+    is_stage2 = confs.get('stage', 1) == 2
+    encoder_parameters = tuple(
+        parameter
+        for name in ('cnn', 'gru1', 'gru2')
+        for parameter in getattr(network, name).parameters()
+        if parameter.requires_grad
+    ) if is_stage2 else ()
+    gradient_totals = [0.0, 0.0]
+    gradient_count = 0
 
     t_range = tqdm.tqdm(loader)
     # Anomaly tracing is useful for debugging, but expensive on every step.
@@ -122,26 +140,60 @@ def train(network, loader, confs, epoch, optimizer):
             loss_state = get_loss(inte_state, label, confs)
             output_metrics.update(inte_state)
             metrics.update(loss_state)
+            should_report = (i + 1) % log_interval == 0 or i + 1 == len(loader)
+            if is_stage2 and should_report:
+                # Use the same forward pass for both weighted objectives.
+                # autograd.grad leaves .grad untouched, and retain_graph keeps
+                # the complete objective available for the normal backward.
+                corrected_gradient_norm = shared_encoder_gradient_norm(
+                    loss_state['loss_corrected'], encoder_parameters,
+                )
+                covariance_gradient_norm = shared_encoder_gradient_norm(
+                    loss_state['loss_covariance'], encoder_parameters,
+                )
             loss_state['loss'].backward()
             optimizer.step()
 
-            if (i + 1) % log_interval == 0 or i + 1 == len(loader):
+            if should_report:
                 current = metrics.averages()
                 description = (
-                    f"training epoch: {epoch:03d}, losses: {current['loss']:.6f}, "
-                    f"position {current['pos_loss']:.6f}, rotation {current['rot_loss']:.6f}, "
-                    f"velocity {current['vel_loss']:.6f}"
+                    f"training epoch: {epoch:03d}, loss: {current['loss']:.6f}, RMSE: "
+                    f"position {current['corrected_pos_rmse']:.6f}, "
+                    f"rotation {current['corrected_rot_rmse']:.6f}, "
+                    f"velocity {current['corrected_vel_rmse']:.6f}"
                 )
-                if confs.propcov:
-                    description += (
-                        f", pred_rot {current['pred_cov_rot']:.6f}, "
-                        f"pred_cov {current['pred_cov_pos']:.6f}"
-                    )
                 t_range.set_description(description, refresh=False)
+                if is_stage2:
+                    context = f"TRAIN Stage 2 epoch={epoch + 1} batch={i + 1}/{len(loader)}"
+                    batch_losses = dict(zip(
+                        (*WEIGHTED_LOSS_KEYS, 'loss'),
+                        torch.stack([loss_state[key].detach() for key in
+                                     (*WEIGHTED_LOSS_KEYS, 'loss')]).cpu().tolist(),
+                    ))
+                    print_weighted_loss_contributions(f"{context} (current batch)", batch_losses)
+                    grad_corrected, grad_covariance = torch.stack((
+                        corrected_gradient_norm, covariance_gradient_norm,
+                    )).cpu().tolist()
+                    gradient_totals[0] += grad_corrected
+                    gradient_totals[1] += grad_covariance
+                    gradient_count += 1
+                    tqdm.tqdm.write(
+                        f"{context} shared encoder gradient L2 norms "
+                        f"(CNN+GRU1+GRU2, current batch, before optimizer step): "
+                        f"encoder_grad_norm_corrected={grad_corrected:.6e}, "
+                        f"encoder_grad_norm_covariance={grad_covariance:.6e}"
+                    )
+                    print_stage2_calibration_metrics(f'{context} (running mean)', current)
 
     result = metrics.averages()
-    print_corrected_calibration_metrics('TRAIN', result, confs.propcov)
-    result.update(output_metrics.summarize('TRAIN', epoch=epoch + 1, propcov=confs.propcov))
+    if gradient_count:
+        # Average norms over the batches measured at log_interval and the
+        # final batch. Validation does not run backward or measure gradients.
+        result.update(zip(ENCODER_GRADIENT_KEYS, (
+            total / gradient_count for total in gradient_totals
+        )))
+    result.update(output_metrics.summarize())
+    print_metric_summary('train', result, epoch + 1)
     return result
 
 
@@ -152,17 +204,15 @@ def test(network, loader, confs, epoch=None):
         uncertainty_keys = (
             'raw_vel_rmse', 'rot_nll', 'vel_nll', 'cov_nll',
             *STAGE2_CALIBRATION_KEYS,
-            'pos_nll',
         )
     else:
         uncertainty_keys = (
-            'corrected_pos_nll', 'corrected_vel_nll', 'corrected_rot_nll',
+            'corrected_rot_nll', 'corrected_vel_nll',
             'corrected_cov_nll', 'corrected_vel_nees',
             'corrected_vel_1sigma', 'corrected_vel_2sigma',
         )
     metrics = _LossMetrics(confs.propcov, uncertainty_keys)
     log_interval = max(1, int(confs.get('log_interval', 10)))
-    acc_covs, gyro_covs = [], []
 
     with torch.no_grad():
         t_range = tqdm.tqdm(loader)
@@ -175,37 +225,55 @@ def test(network, loader, confs, epoch=None):
             output_metrics.update(inte_state)
             metrics.update(loss_state)
 
-            if confs.propcov:
-                acc_covs.append(inte_state['acc_cov'].reshape(-1))
-                gyro_covs.append(inte_state['gyro_cov'].reshape(-1))
-
             if (i + 1) % log_interval == 0 or i + 1 == len(loader):
                 current = metrics.averages()
                 t_range.set_description(
-                    f"testing losses: {current['loss']:.6f}, "
-                    f"position {current['pos_loss']:.6f}, rotation {current['rot_loss']:.6f}, "
-                    f"velocity {current['vel_loss']:.6f}", refresh=False,
+                    f"testing loss: {current['loss']:.6f}, RMSE: "
+                    f"position {current['corrected_pos_rmse']:.6f}, "
+                    f"rotation {current['corrected_rot_rmse']:.6f}, "
+                    f"velocity {current['corrected_vel_rmse']:.6f}", refresh=False,
                 )
-
-        if acc_covs:
-            acc_covs = torch.cat(acc_covs)
-        if gyro_covs:
-            gyro_covs = torch.cat(gyro_covs)
+                if confs.get('stage', 1) == 2:
+                    print_stage2_calibration_metrics(
+                        f'VALIDATION Stage 2 batch={i + 1}/{len(loader)} (running mean)', current,
+                    )
 
     result = metrics.averages()
-    print_corrected_calibration_metrics('VALIDATION', result, confs.propcov)
-    result.update({'acc_covs': acc_covs, 'gyro_covs': gyro_covs})
-    result.update(output_metrics.summarize('VALIDATION', epoch=epoch, propcov=confs.propcov))
+    result.update(output_metrics.summarize())
+    print_metric_summary('test', result, epoch)
     return result
 
 
-def write_wandb(header, objs, epoch_i):
+def scalar_metric_payload(header, objs):
+    """Use one scalar schema for terminal summaries and W&B payloads."""
     if isinstance(objs, dict):
-        metrics = {os.path.join(header, k): v for k, v in objs.items() if isinstance(v, float)}
-        if metrics:
-            wandb.log(metrics, step=epoch_i)
-    else:
-        wandb.log({header: objs}, step = epoch_i)
+        # Guard the compact phase schema if future callers add diagnostics.
+        if header in ('train', 'test', 'tests', 'validation'):
+            objs = {key: value for key, value in objs.items() if key in WANDB_PHASE_METRIC_KEYS}
+        return {os.path.join(header, k): v for k, v in objs.items() if isinstance(v, float)}
+    if isinstance(objs, torch.Tensor):
+        objs = objs.detach().item()
+    return {header: float(objs)}
+
+
+def print_metric_summary(header, objs, epoch_i=None):
+    epoch_label = f' epoch={epoch_i}' if epoch_i is not None else ''
+    tqdm.tqdm.write(f'{header}{epoch_label} scalar metrics:')
+    for key, value in scalar_metric_payload(header, objs).items():
+        tqdm.tqdm.write(f'  {key}={value:.8e}')
+
+
+def write_wandb(header, objs, epoch_i):
+    metrics = scalar_metric_payload(header, objs)
+    if metrics:
+        wandb.log(metrics, step=epoch_i)
+
+
+def report_metrics(header, objs, epoch_i, log_enabled):
+    """Report auxiliary metrics to the terminal and optionally to W&B."""
+    print_metric_summary(header, objs, epoch_i)
+    if log_enabled:
+        write_wandb(header, objs, epoch_i)
 
 
 def log_used_data_paths(conf):
@@ -384,21 +452,16 @@ if __name__ == '__main__':
 
         # save the training meta information
         if args.log:
-            write_wandb("train", train_loss, epoch_i)
-            write_wandb("test", test_loss, epoch_i)
-            write_wandb("lr", scheduler.optimizer.param_groups[0]['lr'], epoch_i)
+            write_wandb("train", train_loss, epoch_i + 1)
+            write_wandb("test", test_loss, epoch_i + 1)
+        report_metrics("lr", scheduler.optimizer.param_groups[0]['lr'], epoch_i + 1, args.log)
 
         if epoch_i%conf.train.eval_freq == conf.train.eval_freq-1:
             eval_state = evaluate(network=network, loader = eval_loader, confs=conf.train)
-            if args.log:
-                write_wandb('eval/pos_rmse', eval_state['loss']['pos'].mean(), epoch_i)
-                write_wandb('eval/rot_rmse', eval_state['loss']['rot'].mean(), epoch_i)
-                write_wandb('eval/vel_rmse', eval_state['loss']['vel'].mean(), epoch_i)
-                write_wandb('eval/rot_dist', eval_state['loss']['rot_dist'].mean(), epoch_i)
-                write_wandb('eval/vel_dist', eval_state['loss']['vel_dist'].mean(), epoch_i)
-                write_wandb('eval/pos_dist', eval_state['loss']['pos_dist'].mean(), epoch_i)
-                
-            print("eval pos: %f eval rot: %f"%(eval_state['loss']['pos'].mean(), eval_state['loss']['rot'].mean()))
+            report_metrics('eval', {
+                f'{state}_rmse': eval_state['loss'][state].mean().item()
+                for state in ('pos', 'rot', 'vel')
+            }, epoch_i + 1, args.log)
 
         scheduler.step(test_loss['loss'])
         if test_loss['loss'] < best_loss:
