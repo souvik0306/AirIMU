@@ -4,6 +4,7 @@ import pypose as pp
 import math
 
 import torch.nn as nn
+import torch.nn.functional as F
 from model.net import ModelBase
 from model.cnn import CNNEncoder
 
@@ -51,13 +52,9 @@ class CodeNet(ModelBase):
             acc_std = conf.acc_std
         self.register_buffer('acc_std', torch.tensor(acc_std))
 
-        # Hard ceiling on predicted variance so the covariance head cannot
-        # "cheat" the NLL loss by inflating uncertainty without limit.
-        # cov_max is the original datasheet noise density, squared (never to
-        # be exceeded); cov_target is the desired operating point (1/5 of the
-        # datasheet std) used only to seed initialization and as a soft
-        # regularization anchor in losses.py — the model can still use the
-        # full range up to cov_max when the data genuinely demands it.
+        # use_cov_limits defaults to True, with optional per-sensor ceilings.
+        # When False, scaled softplus keeps variance positive without a ceiling;
+        # cov_target then sets initialization and scale only.
         # Non-persistent: these are config-derived constants, not learned
         # state, so they must never appear in / be restored from a checkpoint
         # (older checkpoints predate these keys and would fail a strict load).
@@ -67,6 +64,15 @@ class CodeNet(ModelBase):
         gyro_cov_min = conf.get("gyro_cov_min", 0.0001 ** 2)
         gyro_cov_max = conf.get("gyro_cov_max", 0.015 ** 2)
         self.gyro_cov_target = conf.get("gyro_cov_target", 0.003 ** 2)
+        self.use_cov_limits = conf.get("use_cov_limits", True)
+        if not self.use_cov_limits:
+            for sensor, minimum, target in (
+                ("acc", acc_cov_min, self.acc_cov_target),
+                ("gyro", gyro_cov_min, self.gyro_cov_target),
+            ):
+                if not (math.isfinite(minimum) and math.isfinite(target)
+                        and 0 < minimum < target):
+                    raise ValueError(f"Unbounded {sensor} covariance requires 0 < cov_min < cov_target.")
         self.register_buffer('acc_cov_min', torch.tensor(acc_cov_min), persistent=False)
         self.register_buffer('acc_cov_max', torch.tensor(acc_cov_max), persistent=False)
         self.register_buffer('gyro_cov_min', torch.tensor(gyro_cov_min), persistent=False)
@@ -92,7 +98,7 @@ class CodeNet(ModelBase):
         # correction network thinks it just removed, without ever feeding the
         # correction itself downstream (the deployed EKF only consumes raw
         # acc/gyro + this covariance). Zero-initialized so Stage 2 starts out
-        # identical to the plain sigmoid-bounded heads and only learns to use
+        # identical to the covariance heads alone and only learns to use
         # this signal if it actually helps the NLL.
         self.acc_bias_gain = nn.Linear(3, 3, bias=False)
         self.gyro_bias_gain = nn.Linear(3, 3, bias=False)
@@ -102,12 +108,18 @@ class CodeNet(ModelBase):
         self.reset_cov_heads()
 
     def reset_cov_heads(self):
-        """(Re-)seed the covariance heads at the desired target (not the
-        sigmoid midpoint), so training has to justify raising uncertainty
+        """(Re-)seed the covariance heads at the desired target,
+        so training has to justify raising uncertainty
         above it. Must be called again after loading a pretrained checkpoint:
         those heads are dead weight carried over from a propcov=False stage
         and would otherwise silently overwrite this initialization.
         """
+        if not self.use_cov_limits:
+            # softplus(0) / log(2) == 1, so both heads start at cov_target.
+            for decoder in (self.acccov_decoder, self.gyrocov_decoder):
+                nn.init.zeros_(decoder[-1].weight)
+                nn.init.zeros_(decoder[-1].bias)
+            return
         conf = self.conf
         acc_default_fraction = (self.acc_cov_target - self.acc_cov_min) / (self.acc_cov_max - self.acc_cov_min)
         gyro_default_fraction = (self.gyro_cov_target - self.gyro_cov_min) / (self.gyro_cov_max - self.gyro_cov_min)
@@ -136,12 +148,12 @@ class CodeNet(ModelBase):
         acc_logit = self.acccov_decoder(x) + self.acc_bias_gain(correction[..., :3])
         gyro_logit = self.gyrocov_decoder(x) + self.gyro_bias_gain(correction[..., 3:])
 
-        # Bounded sigmoid parameterization: variance is always within
-        # [cov_min, cov_max] regardless of the raw network output, so the
-        # model cannot drive uncertainty above the sensor's physical noise
-        # floor to minimize the NLL loss.
-        acc = self.acc_cov_min + (self.acc_cov_max - self.acc_cov_min) * torch.sigmoid(acc_logit)
-        gyro = self.gyro_cov_min + (self.gyro_cov_max - self.gyro_cov_min) * torch.sigmoid(gyro_logit)
+        if not self.use_cov_limits:
+            acc = self.acc_cov_min + (self.acc_cov_target - self.acc_cov_min) * F.softplus(acc_logit) / math.log(2)
+            gyro = self.gyro_cov_min + (self.gyro_cov_target - self.gyro_cov_min) * F.softplus(gyro_logit) / math.log(2)
+        else:
+            acc = self.acc_cov_min + (self.acc_cov_max - self.acc_cov_min) * torch.sigmoid(acc_logit)
+            gyro = self.gyro_cov_min + (self.gyro_cov_max - self.gyro_cov_min) * torch.sigmoid(gyro_logit)
 
         return torch.cat([acc, gyro], dim = -1)
 
