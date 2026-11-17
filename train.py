@@ -18,6 +18,12 @@ from model.losses import get_loss
 from eval import evaluate
 
 
+STAGE2_CALIBRATION_KEYS = (
+    'rot_nees', 'rot_1sigma_coverage', 'vel_nees',
+    'vel_1sigma_coverage', 'vel_2sigma_coverage',
+)
+
+
 class _LossMetrics:
     """Keep detached loss totals on the device until a reporting interval."""
 
@@ -91,7 +97,8 @@ def train(network, loader, confs, epoch, optimizer):
     network.train()
     if confs.get('stage', 1) == 2:
         uncertainty_keys = (
-            'raw_vel_rmse', 'vel_nees', 'vel_1sigma', 'vel_2sigma', 'vel_nll',
+            'raw_vel_rmse', 'rot_nll', 'vel_nll', 'cov_nll',
+            *STAGE2_CALIBRATION_KEYS,
         )
     else:
         uncertainty_keys = (
@@ -143,8 +150,9 @@ def test(network, loader, confs, epoch=None):
     output_metrics = OutputMetrics()
     if confs.get('stage', 1) == 2:
         uncertainty_keys = (
-            'raw_vel_rmse', 'vel_nees', 'vel_1sigma', 'vel_2sigma',
-            'rot_nll', 'vel_nll', 'pos_nll', 'cov_nll',
+            'raw_vel_rmse', 'rot_nll', 'vel_nll', 'cov_nll',
+            *STAGE2_CALIBRATION_KEYS,
+            'pos_nll',
         )
     else:
         uncertainty_keys = (
