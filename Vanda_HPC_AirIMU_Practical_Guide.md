@@ -51,8 +51,8 @@ ls
 Check the TLab dataset:
 
 ```bash
-ls ./T-Lab_31st_July_dataset
-ls ./T-Lab_28th_July_dataset
+ls ./data/T-Lab_31st_July_dataset
+ls ./data/T-Lab_28th_July_dataset
 ```
 
 Check the pretrained model:

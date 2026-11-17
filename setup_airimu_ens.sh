@@ -115,8 +115,9 @@ fi
 download_and_extract() {
     local target_dir="$1"
     local url="$2"
+    local destination_root="${3:-$SCRIPT_DIR}"
 
-    if [[ -d "$SCRIPT_DIR/$target_dir" ]]; then
+    if [[ -d "$destination_root/$target_dir" ]]; then
         echo "Already present: $target_dir"
         return
     fi
@@ -145,7 +146,8 @@ if not (root / target).is_dir():
 if target == "AirIMU_EuRoC" and not (root / target / "best_model.ckpt").is_file():
     raise SystemExit("Archive is missing best_model.ckpt")
 PYTHON
-    mv -- "$TEMP_DIR/extracted/$target_dir" "$SCRIPT_DIR/$target_dir"
+    mkdir -p -- "$destination_root"
+    mv -- "$TEMP_DIR/extracted/$target_dir" "$destination_root/$target_dir"
     cleanup
     TEMP_DIR=""
 }
@@ -155,19 +157,24 @@ if [[ "$SKIP_DOWNLOADS" == "1" ]]; then
 else
     download_and_extract \
         "T-Lab_31st_July_dataset" \
-        "https://github.com/souvik0306/AirIMU/releases/download/31st_July_fast_agile/T-Lab_31st_July_dataset.zip"
+        "https://github.com/souvik0306/AirIMU/releases/download/31st_July_fast_agile/T-Lab_31st_July_dataset.zip" \
+        "$SCRIPT_DIR/data"
     download_and_extract \
         "T-Lab_28th_July_dataset" \
-        "https://github.com/souvik0306/AirIMU/releases/download/28th_july_hover/T-Lab_28th_July_dataset.zip"
+        "https://github.com/souvik0306/AirIMU/releases/download/28th_july_hover/T-Lab_28th_July_dataset.zip" \
+        "$SCRIPT_DIR/data"
     download_and_extract \
         "T-Lab_10th_September_dataset" \
-        "https://github.com/souvik0306/AirIMU/releases/download/10th_Sept/T-Lab_10th_September_dataset.zip"
+        "https://github.com/souvik0306/AirIMU/releases/download/10th_Sept/T-Lab_10th_September_dataset.zip" \
+        "$SCRIPT_DIR/data"
     download_and_extract \
         "T-Lab_14th_October_dataset" \
-        "https://github.com/souvik0306/AirIMU/releases/download/15th_oct/T-Lab_14th_October_dataset.zip"
+        "https://github.com/souvik0306/AirIMU/releases/download/15th_oct/T-Lab_14th_October_dataset.zip" \
+        "$SCRIPT_DIR/data"
     download_and_extract \
         "T-Lab_15th_October_dataset" \
-        "https://github.com/souvik0306/AirIMU/releases/download/15th_oct/T-Lab_15th_October_dataset.zip"
+        "https://github.com/souvik0306/AirIMU/releases/download/15th_oct/T-Lab_15th_October_dataset.zip" \
+        "$SCRIPT_DIR/data"
     download_and_extract \
         "AirIMU_EuRoC" \
         "https://github.com/Air-IO/Air-IO/releases/download/AirIMU/AirIMU_EuRoC.zip"

@@ -17,5 +17,5 @@ AirIMU_EuRoC/*
 .airimu-tools/*
 .venv/*
 tests/
-/test_covariance_output.py
-/test_initial_sensor_bias_config.py
+
+/data/
