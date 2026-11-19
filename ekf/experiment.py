@@ -7,6 +7,18 @@ import torch
 from .training import AirIMUESKF, horizontal_velocity_residual
 
 
+def filter_metadata(ekf):
+    """Record the aiding policy independently of the AirIMU model weights."""
+    return {"height_updates": ekf.height_updates,
+            "height_source": "clean_vicon_z" if ekf.height_updates else None,
+            "height_update_frequency": "estimate" if ekf.height_updates else None,
+            "height_update_scope": "before_and_after_cutoff" if ekf.height_updates else None,
+            "pre_cutoff_observation_types": list(ekf.observation_types) + (["height"] if ekf.height_updates else []),
+            "height_measurement_std": math.sqrt(float(ekf.height_R[0, 0])),
+            "post_cutoff_observation_types": ["height"] if ekf.height_updates else [],
+            "post_cutoff_covariance_propagation": True}
+
+
 def covariance_statistics(variance):
     """Per-axis predicted IMU variances, ordered acceleration xyz then gyro xyz."""
     values = variance.detach()

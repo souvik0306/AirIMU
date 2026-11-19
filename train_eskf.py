@@ -11,7 +11,7 @@ import torch
 
 from ekf import DifferentiableESKF
 from ekf.data import apply_sensor_metadata, read_dataset_flights
-from ekf.experiment import load_airimu, save_checkpoint
+from ekf.experiment import filter_metadata, load_airimu, save_checkpoint
 from ekf.runner import FlightTrainer
 
 
@@ -19,6 +19,28 @@ def log_flight(output_dir, record):
     print(json.dumps(record), flush=True)
     with (output_dir / "flights.jsonl").open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record) + "\n")
+
+
+def log_epoch(output_dir, record):
+    """Save structured metrics and print readable per-axis epoch statistics."""
+    with (output_dir / "metrics.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+    print(json.dumps(record), flush=True)
+    print(f"epoch={record['epoch']} train_xy_mse={record['train_xy_mse']:.6g} "
+          f"validation_xy_mse={record['validation_xy_mse']:.6g} "
+          f"best_validation_xy_mse={record['best_validation_xy_mse']:.6g} "
+          f"epoch_seconds={record['epoch_seconds']:.3f}", flush=True)
+    for phase in ("train", "validation"):
+        covariance = record[f"{phase}_covariance"]
+        for sensor in ("acc_cov", "gyro_cov"):
+            statistics = covariance[sensor]
+            values = {
+                name: "[" + ", ".join(f"{value:.6e}" for value in statistics[key]) + "]"
+                for name, key in (("min", "min"), ("avg", "mean"), ("max", "max"))
+            }
+            print(f"epoch={record['epoch']} phase={phase} sensor={sensor} axes=x,y,z "
+                  f"samples={covariance['samples']} min={values['min']} "
+                  f"avg={values['avg']} max={values['max']}", flush=True)
 
 
 def main():
@@ -44,6 +66,10 @@ def main():
                         help="Complete flights averaged per Adam step; use >= replay-workers for parallel work")
     parser.add_argument("--feature-cache-mb", type=float, default=512,
                         help="CPU cache budget for frozen encoder features; 0 disables caching")
+    parser.add_argument("--replay-backend", choices=("eager", "compiled"), default="compiled",
+                        help="Compiled aligned TLab replay preserves full-flight gradients and Float64")
+    parser.add_argument("--height-updates", action=argparse.BooleanOptionalAction, default=True,
+                        help="Fuse clean Vicon z before and after cutoff at every estimate, std=0.1 m (default: enabled)")
     args = parser.parse_args()
     if args.epochs < 1 or not math.isfinite(args.lr) or args.lr <= 0 or args.cpu_threads < 1:
         parser.error("epochs, lr, and cpu-threads must be positive.")
@@ -65,8 +91,17 @@ def main():
     ekf_device = args.ekf_device or ("cpu" if args.replay_workers else args.device)
     if args.replay_workers and torch.device(ekf_device).type != "cpu":
         parser.error("--replay-workers requires --ekf-device cpu (AirIMU can stay on CUDA).")
-    ekf = DifferentiableESKF(gravity=args.gravity).to(ekf_device)
+    ekf = DifferentiableESKF(gravity=args.gravity, height_updates=args.height_updates).to(ekf_device)
     wrapper = load_airimu(args.config, args.ckpt, ekf, args.device)
+    covariance_policy = {
+        "use_cov_limits": wrapper.network.use_cov_limits,
+        "acc_variance_min": float(wrapper.network.acc_cov_min),
+        "gyro_variance_min": float(wrapper.network.gyro_cov_min),
+        "acc_variance_max": (float(wrapper.network.acc_cov_max)
+                             if wrapper.network.use_cov_limits else None),
+        "gyro_variance_max": (float(wrapper.network.gyro_cov_max)
+                              if wrapper.network.use_cov_limits else None),
+    }
     parameters = [p for p in wrapper.network.parameters() if p.requires_grad]
     optimizer = torch.optim.Adam(parameters, lr=args.lr)
     metadata = {"gravity": list(args.gravity), "observation_types": list(ekf.observation_types),
@@ -80,17 +115,25 @@ def main():
                 "return_covariance_during_training": False,
                 "replay_workers": args.replay_workers, "worker_threads": 1,
                 "flight_batch_size": args.flight_batch_size, "feature_cache_mb": args.feature_cache_mb,
-                "optimizer_objective": "mean of complete-flight horizontal velocity MSEs per batch"}
+                "replay_backend": args.replay_backend,
+                "covariance_policy": covariance_policy,
+                "optimizer_objective": "mean of complete-flight horizontal velocity MSEs per batch",
+                **filter_metadata(ekf)}
     with (output_dir / "eskf_metadata.json").open("w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2)
     best_validation = math.inf
     print(f"Network device: {args.device}; EKF device: {ekf_device}; "
           f"flights per epoch: {len(training)} train + {len(validation)} validation", flush=True)
+    print(f"Initial biases: flight-specific CSV values from {Path(args.sensor_metadata_root).resolve()}; "
+          "refined during Vicon aiding, retained at cutoff; raw IMU is unchanged.", flush=True)
     print("Covariance logs contain per-axis variances in x,y,z order, before the optimizer step.", flush=True)
     print(f"Replay workers: {args.replay_workers}; threads/worker: 1; "
           f"flights/Adam step: {args.flight_batch_size}; feature cache: {args.feature_cache_mb:g} MiB", flush=True)
+    print(f"Replay backend: {args.replay_backend}", flush=True)
+    print(f"Covariance policy: {json.dumps(covariance_policy)}", flush=True)
+    print(f"Filter aiding policy: {json.dumps(filter_metadata(ekf))}", flush=True)
     with FlightTrainer(wrapper, optimizer, workers=args.replay_workers, batch_size=args.flight_batch_size,
-                       feature_cache_mb=args.feature_cache_mb) as trainer:
+                       feature_cache_mb=args.feature_cache_mb, replay_backend=args.replay_backend) as trainer:
         for epoch in range(args.epochs):
             epoch_start = perf_counter()
             rng.shuffle(training)
@@ -115,9 +158,7 @@ def main():
                       "optimizer_steps": trainer.optimizer_steps-previous_steps,
                       "feature_cache_hits": trainer.cache_hits, "feature_cache_misses": trainer.cache_misses,
                       "epoch_seconds": perf_counter()-epoch_start}
-            with (output_dir / "metrics.jsonl").open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record) + "\n")
-            print(json.dumps(record), flush=True)
+            log_epoch(output_dir, record)
 
 
 if __name__ == "__main__":

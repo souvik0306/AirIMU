@@ -154,6 +154,8 @@ For covariance-only AirIMU training through a differentiable 15-state EKF with
 Vicon cutoff, see [the ESKF integration guide](doc/differentiable_eskf.md).
 The new entry points are `train_eskf.py` and
 `python -m evaluation.evaluate_eskf`; existing training commands are unchanged.
+For the training bottleneck, performance changes and measured A40 benchmark,
+see [why EKF training became faster](doc/ekf_training_performance.md).
 
 ### Cite Our Work
 

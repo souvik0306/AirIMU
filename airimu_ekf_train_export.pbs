@@ -1,0 +1,128 @@
+#PBS -S /bin/bash
+#PBS -q auto_free
+#PBS -j oe
+#PBS -N airimu_ekf20_export
+#PBS -l walltime=06:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
+
+# Prepare the inputs with scripts/prepare_ekf_run.py, then submit:
+# qsub -v EKF_RUN_ROOT=/absolute/path/to/prepared/run airimu_ekf_train_export.pbs
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+module load apptainer/1.4.1
+image=/app1/common/singularity-img/vanda/pytorch_2.5_cuda_12.4_unsloth.sif
+run_root=${EKF_RUN_ROOT:?Set EKF_RUN_ROOT to a validated experiment directory}
+run_root=$(realpath "$run_root")
+config="$run_root/configs/stage2.conf"
+dataset="$run_root/configs/dataset.conf"
+metadata="$run_root/configs/initial_sensor_biases"
+checkpoint="$run_root/inputs/stage2_best_model.ckpt"
+training="$run_root/ekf_training"
+inference="$run_root/inference"
+evaluation="$run_root/evaluation_results"
+export_dir="$run_root/export"
+exec > >(tee -a "$run_root/job.log") 2>&1
+
+# Refuse changed inputs or an accidental restart into an existing training run.
+python3 -s - "$run_root/run_plan.json" <<'PY'
+import hashlib, json, pathlib, sys
+plan_path = pathlib.Path(sys.argv[1])
+plan = json.loads(plan_path.read_text())
+for name, expected in plan['input_sha256'].items():
+    path = plan_path.parent / name
+    if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        raise RuntimeError(f'Frozen input changed: {path}')
+if (plan_path.parent / 'ekf_training').exists():
+    raise RuntimeError('Training output already exists; prepare a new experiment directory.')
+print('Source Stage 2:', plan['source_stage2_checkpoint'], flush=True)
+print('Source epoch:', plan['source_checkpoint_epoch'], flush=True)
+print('Frozen checkpoint SHA256:', plan['input_sha256']['inputs/stage2_best_model.ckpt'], flush=True)
+print('Flight splits:', plan['split_counts'], flush=True)
+print('No maximum covariance limits. Initial biases enabled.', flush=True)
+if not plan.get('height_updates', False) or plan.get('height_update_scope') != 'before_and_after_cutoff':
+    raise RuntimeError('Prepare a new run with height aiding before and after cutoff enabled.')
+print('EKF behavior: clean Vicon Z at every estimate before and after cutoff (std 0.1 m); XY/velocity/yaw before cutoff only.', flush=True)
+PY
+epochs=$(python3 -s -c 'import json,sys; print(json.load(open(sys.argv[1]))["epochs"])' "$run_root/run_plan.json")
+learning_rate=$(python3 -s -c 'import json,sys; print(json.load(open(sys.argv[1]))["learning_rate"])' "$run_root/run_plan.json")
+export TORCHINDUCTOR_CACHE_DIR="${TMPDIR:-/tmp}/airimu_inductor_${PBS_JOBID%%.*}"
+export TORCHINDUCTOR_FX_GRAPH_CACHE=1 TORCHINDUCTOR_COMPILE_THREADS=1
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MPLBACKEND=Agg
+run_python() {
+    apptainer exec --nv -e --env PYTHONNOUSERSITE=1 \
+        --env OMP_NUM_THREADS=1,MKL_NUM_THREADS=1,OPENBLAS_NUM_THREADS=1,MPLBACKEND=Agg \
+        --env "TORCHINDUCTOR_CACHE_DIR=$TORCHINDUCTOR_CACHE_DIR" \
+        --env TORCHINDUCTOR_FX_GRAPH_CACHE=1,TORCHINDUCTOR_COMPILE_THREADS=1 \
+        "$image" python3 -s -u scripts/container_python.py "$@"
+}
+printf 'Run directory: %s\nCompute node: %s\n' "$run_root" "$(hostname)"
+nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
+nvidia-smi --query-gpu=timestamp,name,utilization.gpu,utilization.memory,memory.used,power.draw \
+    --format=csv -l 10 > "$run_root/gpu_usage.csv" &
+monitor_pid=$!
+trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
+apptainer exec --nv -e "$image" python3 -s -c \
+    'import torch; assert torch.cuda.is_available(), "CUDA is required for the AirIMU network"'
+
+echo "Starting $epochs EKF epochs from the frozen Stage 2 checkpoint."
+run_python train_eskf.py --config "$config" --ckpt "$checkpoint" \
+    --dataset-config "$dataset" --sensor-metadata-root "$metadata" \
+    --output "$training" --device cuda:0 --ekf-device cpu \
+    --epochs "$epochs" --lr "$learning_rate" --cpu-threads 1 --height-updates \
+    --replay-backend compiled --replay-workers 4 --flight-batch-size 4 --feature-cache-mb 512
+best_checkpoint="$training/best_model.ckpt"
+[[ -s "$best_checkpoint" ]] || { echo "Missing best EKF checkpoint" >&2; exit 3; }
+mkdir -p "$inference" "$evaluation" "$export_dir"
+
+echo "Running inference for all flights using the best EKF checkpoint."
+run_python inference.py --config "$config" --load "$best_checkpoint" \
+    --exp_dir "$inference" --device cuda:0
+[[ -s "$inference/net_output.pickle" ]] || { echo "Missing inference outputs" >&2; exit 4; }
+
+echo "Evaluating inferred IMU corrections for all flights."
+run_python evaluation/evaluate_state.py --device cpu --dataconf "$dataset" \
+    --exp "$inference" --savedir "$evaluation/state"
+[[ -s "$evaluation/state/loss_result.json" ]] || { echo "Missing state evaluation metrics" >&2; exit 5; }
+
+echo "Evaluating learned covariance in the EKF on the held-out flights."
+# Dataset eval maps to EKF test; dataset test is used only for validation.
+run_python -m evaluation.evaluate_eskf --config "$config" --ckpt "$best_checkpoint" \
+    --dataset-config "$dataset" --sensor-metadata-root "$metadata" \
+    --output "$evaluation/eskf_test" --split test --device cuda:0 --ekf-device cpu --cpu-threads 1 --height-updates
+[[ -s "$evaluation/eskf_test/metrics.json" ]] || { echo "Missing EKF evaluation metrics" >&2; exit 6; }
+
+echo "Exporting the best EKF-trained AirIMU network to CPU FP32 ONNX and PyTorch."
+run_python export_onnx_fp32.py --config "$config" --ckpt "$best_checkpoint" \
+    --onnx "$export_dir/airimu_cpu_fp32.onnx" --torch "$export_dir/airimu_cpu_fp32.pt" \
+    --num-imu-frames 200 | tee "$export_dir/export.log"
+# Enforce this job's verification requirement without changing the shared exporter.
+if ! rg -q -F 'ONNX export verified - all outputs match PyTorch!' "$export_dir/export.log"; then
+    echo "ONNX output verification did not pass" >&2
+    exit 7
+fi
+for result in "$export_dir/airimu_cpu_fp32.onnx" "$export_dir/airimu_cpu_fp32.pt"; do
+    [[ -s "$result" ]] || { echo "Missing export: $result" >&2; exit 7; }
+done
+python3 -s - "$run_root" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+plan = json.loads((root / 'run_plan.json').read_text())
+metrics = [json.loads(line) for line in (root / 'ekf_training/metrics.jsonl').read_text().splitlines()]
+if [row['epoch'] for row in metrics] != list(range(1, plan['epochs'] + 1)):
+    raise RuntimeError('The requested EKF epochs did not all complete.')
+reports = json.loads((root / 'evaluation_results/eskf_test/metrics.json').read_text())
+if len(reports) != plan['ekf_split_counts']['test']:
+    raise RuntimeError('EKF evaluation did not cover all held-out flights.')
+best = min(metrics, key=lambda row: row['validation_xy_mse'])
+summary = {'epochs_completed': len(metrics), 'best_epoch': best['epoch'],
+           'best_validation_xy_mse': best['validation_xy_mse'],
+           'held_out_ekf_flights': len(reports), 'onnx_verification_passed': True,
+           'artifacts_sha256': {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+                                for path in (root / 'ekf_training/best_model.ckpt',
+                                             root / 'export/airimu_cpu_fp32.onnx',
+                                             root / 'export/airimu_cpu_fp32.pt')}}
+(root / 'completion.json').write_text(json.dumps(summary, indent=2) + '\n')
+print(json.dumps(summary, indent=2), flush=True)
+PY
+echo "EKF training, inference, evaluation and export completed: $run_root"
+date -u +%FT%TZ > "$run_root/COMPLETE"

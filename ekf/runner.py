@@ -17,20 +17,25 @@ def synchronize(device):
 
 
 class FlightTrainer:
-    def __init__(self, wrapper, optimizer, *, workers=0, batch_size=1, feature_cache_mb=512):
+    def __init__(self, wrapper, optimizer, *, workers=0, batch_size=1, feature_cache_mb=512,
+                 replay_backend="eager"):
         self.wrapper = wrapper
         self.optimizer = optimizer
         self.parameters = [p for p in wrapper.network.parameters() if p.requires_grad]
         self.device = next(wrapper.network.parameters()).device
         self.batch_size = batch_size
-        self.cpu_filter = DifferentiableESKF(gravity=wrapper.ekf.gravity.cpu().tolist())
+        self.replay_backend = replay_backend
+        self.cpu_filter = DifferentiableESKF(gravity=wrapper.ekf.gravity.cpu().tolist(),
+                                             height_updates=wrapper.ekf.height_updates)
         self.features = OrderedDict()
         self.feature_bytes = 0
         self.feature_limit = int(feature_cache_mb * 1024**2)
         self.cache_hits = 0
         self.cache_misses = 0
         self.optimizer_steps = 0
-        self.pool = FlightReplayPool(workers, gravity=self.cpu_filter.gravity.tolist()) if workers else None
+        self.pool = FlightReplayPool(workers, gravity=self.cpu_filter.gravity.tolist(),
+                                     backend=replay_backend,
+                                     height_updates=self.cpu_filter.height_updates) if workers else None
 
     def _features(self, records, cutoffs):
         result = []
@@ -90,7 +95,7 @@ class FlightTrainer:
             else:
                 outputs = [replay_velocity(self.wrapper.ekf,
                            prepare_flight(record, cutoffs[record["id"]], self.cpu_filter),
-                           variance, backward=training)
+                           variance, backward=training, backend=self.replay_backend)
                            for record, variance in zip(batch, variances)]
                 cached = None
             replayed = perf_counter()
@@ -123,6 +128,7 @@ class FlightTrainer:
                      "timing_seconds": output["timing_seconds"],
                      "worker_pid": output.get("worker_pid"),
                      "worker_peak_memory_mb": output.get("worker_peak_memory_mb"),
+                     "height_update_count": output["height_update_count"],
                      "epoch_elapsed_seconds": perf_counter()-epoch_start})
             replay_cores = sum(output["timing_seconds"].get("cpu", 0.) for output in outputs) / max(replayed-decoded, 1e-9)
             gpu_peak = torch.cuda.max_memory_allocated(self.device)/1024**3 if self.device.type == "cuda" else 0.

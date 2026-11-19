@@ -28,6 +28,7 @@ cpu_threads=${EKF_CPU_THREADS:-1}
 replay_workers=${EKF_REPLAY_WORKERS:-4}
 flight_batch_size=${EKF_FLIGHT_BATCH_SIZE:-$((replay_workers > 0 ? replay_workers : 1))}
 feature_cache_mb=${EKF_FEATURE_CACHE_MB:-512}
+replay_backend=${EKF_REPLAY_BACKEND:-compiled}
 default_ekf_device=cpu
 if [[ "$replay_workers" == "0" ]]; then default_ekf_device=cuda:0; fi
 ekf_device=${EKF_DEVICE:-$default_ekf_device}
@@ -73,6 +74,7 @@ echo "Sensor metadata: $sensor_metadata_root"
 echo "ESKF epochs: $ekf_epochs; ESKF learning rate: $ekf_learning_rate"
 echo "ESKF device: $ekf_device (AirIMU network: cuda:0)"
 echo "Replay workers: $replay_workers; threads/worker: 1; flights/Adam step: $flight_batch_size"
+echo "Replay backend: $replay_backend"
 echo "Working directory: $(pwd)"
 echo "Compute node: $(hostname)"
 nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
@@ -114,8 +116,12 @@ if [[ ! -f "$stage2_checkpoint" ]]; then
 fi
 
 echo "Starting joint ESKF training from the Stage 2 checkpoint: $stage2_checkpoint"
-apptainer exec --nv -e "$image" \
-python3 -u train_eskf.py \
+inductor_cache="${TMPDIR:-/tmp}/airimu_inductor_${job_id}"
+apptainer exec --nv -e --env PYTHONNOUSERSITE=1 \
+--env "TORCHINDUCTOR_CACHE_DIR=$inductor_cache" \
+--env TORCHINDUCTOR_FX_GRAPH_CACHE=1,TORCHINDUCTOR_COMPILE_THREADS=1 \
+--env OMP_NUM_THREADS=1,MKL_NUM_THREADS=1,OPENBLAS_NUM_THREADS=1 "$image" \
+python3 -s -u scripts/container_python.py train_eskf.py \
 --config "$stage2_config" \
 --ckpt "$stage2_checkpoint" \
 --dataset-config "$dataset_config" \
@@ -127,6 +133,7 @@ python3 -u train_eskf.py \
 --lr "$ekf_learning_rate" \
 --cpu-threads "$cpu_threads" \
 --replay-workers "$replay_workers" \
+--replay-backend "$replay_backend" \
 --flight-batch-size "$flight_batch_size" \
 --feature-cache-mb "$feature_cache_mb"
 

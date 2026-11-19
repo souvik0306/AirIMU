@@ -22,6 +22,20 @@ _SEPTEMBER_BIAS_DIRECTORIES = {
     "Yaw": "10th_Sept_AI_Yaw_Rosbags",
 }
 
+_CATEGORY_BIAS_DIRECTORIES = {
+    "T-Lab_10th_September_dataset": _SEPTEMBER_BIAS_DIRECTORIES,
+    "T-Lab_14th_October_dataset": {
+        "High-Dynamic": "14th_Oct_High",
+        "Low-Dynamic": "14th_Oct_Low",
+        "Medium-Dynamic": "14th_Oct_Medium",
+    },
+    "T-Lab_15th_October_dataset": {
+        "High-Dynamic": "15th_Oct_High",
+        "Low-Dynamic": "15th_Oct_Low",
+        "Medium-Dynamic": "15th_Oct_Medium",
+    },
+}
+
 _BIAS_COLUMNS = (
     "accel_bias_x_mps2",
     "accel_bias_y_mps2",
@@ -68,18 +82,19 @@ def _bias_location(data_root, data_name):
             )
         bias_directory = _DATASET_BIAS_DIRECTORIES[dataset_name]
         group = parts[0].upper()
-    elif dataset_name == "T-Lab_10th_September_dataset":
+    elif dataset_name in _CATEGORY_BIAS_DIRECTORIES:
         if len(parts) != 3:
             raise ValueError(
                 f"Expected CATEGORY/GROUP/flight_N for {dataset_name}, "
                 f"got {data_name!r}."
             )
         category, group = parts[0], parts[1].upper()
-        if category not in _SEPTEMBER_BIAS_DIRECTORIES:
+        directories = _CATEGORY_BIAS_DIRECTORIES[dataset_name]
+        if category not in directories:
             raise KeyError(
                 f"No initial-bias directory mapping is defined for {category!r}."
             )
-        bias_directory = _SEPTEMBER_BIAS_DIRECTORIES[category]
+        bias_directory = directories[category]
     else:
         raise KeyError(
             f"No initial-bias mapping is defined for dataset {dataset_name!r}."

@@ -1,0 +1,133 @@
+#PBS -S /bin/bash
+#PBS -q auto_free
+#PBS -j oe
+#PBS -N airimu_stage12_export
+#PBS -l walltime=24:00:00
+#PBS -l select=1:ncpus=12:mem=96gb:ngpus=1
+
+# Submit with: qsub airimu_stage12_export.pbs
+# Runs scratch Stage 1, Stage 2 with fixed initial bias subtraction,
+# inference, evaluation, and ONNX export. Stage controls allow Stage 1 to run
+# while new-flight bias tables are being supplied: STOP_AFTER=stage1, then
+# START_STAGE=stage2 with the same AIRIMU_RUN_ROOT.
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+module load apptainer/1.4.1
+
+image=/app1/common/singularity-img/vanda/pytorch_2.5_cuda_12.4_unsloth.sif
+stage1_config=configs/exp/TLab/4th_Nov_Scratch.conf
+stage2_config=configs/exp/TLab/4th_Nov_Scratch_stage2.conf
+dataset_config=configs/datasets/TLab/tlab_body.conf
+
+run_timestamp=$(TZ=Asia/Singapore date +%Y%m%d_%H%M%S_SGT)
+job_id=${PBS_JOBID%%.*}
+run_root=${AIRIMU_RUN_ROOT:-experiments/${run_timestamp}_job${job_id}_october_bias_no_cov_limits/scratch}
+start_stage=${START_STAGE:-stage1}
+stop_after=${STOP_AFTER:-export}
+[[ "$start_stage" == stage1 || "$start_stage" == stage2 ]] || { echo "Invalid START_STAGE" >&2; exit 2; }
+[[ "$stop_after" == stage1 || "$stop_after" == export ]] || { echo "Invalid STOP_AFTER" >&2; exit 2; }
+[[ "$start_stage" != stage2 || "$stop_after" != stage1 ]] || { echo "Invalid stage order" >&2; exit 2; }
+mkdir -p "$run_root"
+exec > >(tee -a "$run_root/job_${job_id}.log") 2>&1
+export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 MPLBACKEND=Agg
+run_python() {
+    apptainer exec --nv -e --env PYTHONNOUSERSITE=1 \
+        --env OMP_NUM_THREADS=4,MKL_NUM_THREADS=4,OPENBLAS_NUM_THREADS=4,MPLBACKEND=Agg \
+        "$image" python3 -s -u scripts/container_python.py "$@"
+}
+prepare_stage=all
+if [[ "$start_stage" == stage2 ]]; then prepare_stage=stage2; fi
+if [[ "$stop_after" == stage1 ]]; then prepare_stage=stage1; fi
+bias_args=()
+if [[ -n "${SENSOR_BIAS_ROOT:-}" ]]; then bias_args=(--sensor-bias-root "$SENSOR_BIAS_ROOT"); fi
+run_python scripts/prepare_stage12_run.py --stage1-config "$stage1_config" \
+    --stage2-config "$stage2_config" --dataset-config "$dataset_config" \
+    --output "$run_root/configs" --stage "$prepare_stage" "${bias_args[@]}"
+stage1_config="$run_root/configs/stage1.conf"
+stage2_config="$run_root/configs/stage2.conf"
+dataset_config="$run_root/configs/dataset.conf"
+stage1_exp="$run_root/stage1"
+stage2_exp="$run_root/stage2"
+evaluation_output="$stage2_exp/evaluation_results"
+
+echo "Run root: $run_root"
+echo "Compute node: $(hostname)"
+nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
+
+if [[ "$start_stage" == stage1 ]]; then
+echo "Starting Stage 1 from scratch (25 configured epochs, no covariance ceilings)"
+run_python train_motion_finetune.py \
+    --config "$stage1_config" \
+    --exp_dir "$stage1_exp" \
+    --pretrained_ckpt none \
+    --device cuda:0
+fi
+
+stage1_checkpoint="$stage1_exp/ckpt/best_model.ckpt"
+if [[ ! -s "$stage1_checkpoint" ]]; then
+    echo "ERROR: Stage 1 completed without best_model.ckpt" >&2
+    exit 3
+fi
+if [[ "$stop_after" == stage1 ]]; then
+    echo "Stage 1 complete: $stage1_checkpoint"
+    echo "Stage 2, inference, evaluation and export require the October bias tables."
+    exit 0
+fi
+
+# Stage 2 validates and loads its own per-flight biases before training.
+echo "Starting Stage 2 with fixed initial bias subtraction (30 configured epochs)"
+run_python train_motion_finetune.py \
+    --config "$stage2_config" \
+    --exp_dir "$stage2_exp" \
+    --pretrained_ckpt "$stage1_checkpoint" \
+    --non_strict_pretrained \
+    --device cuda:0
+
+stage2_checkpoint="$stage2_exp/ckpt/best_model.ckpt"
+if [[ ! -s "$stage2_checkpoint" ]]; then
+    echo "ERROR: Stage 2 completed without an eligible best_model.ckpt" >&2
+    exit 4
+fi
+
+echo "Running inference with the best Stage 2 checkpoint"
+run_python inference.py \
+    --config "$stage2_config" \
+    --exp_dir "$stage2_exp" \
+    --device cuda:0
+
+if [[ ! -s "$stage2_exp/net_output.pickle" ]]; then
+    echo "ERROR: Stage 2 inference completed without net_output.pickle" >&2
+    exit 5
+fi
+
+echo "Generating Stage 2 evaluation metrics and plots"
+run_python evaluation/evaluate_state.py \
+    --device cpu \
+    --dataconf "$dataset_config" \
+    --exp "$stage2_exp" \
+    --savedir "$evaluation_output"
+
+if [[ ! -s "$evaluation_output/loss_result.json" ]]; then
+    echo "ERROR: Stage 2 evaluation completed without loss_result.json" >&2
+    exit 6
+fi
+
+onnx_output="$stage2_exp/airimu_cpu_fp32_scratch.onnx"
+torch_output="$stage2_exp/airimu_cpu_fp32.pt"
+echo "Exporting the best Stage 2 checkpoint to CPU FP32 ONNX"
+run_python export_onnx_fp32.py \
+    --config "$stage2_config" \
+    --ckpt "$stage2_checkpoint" \
+    --onnx "$onnx_output" \
+    --torch "$torch_output" \
+    --num-imu-frames 200
+
+for result in "$onnx_output" "$torch_output"; do
+    if [[ ! -s "$result" ]]; then
+        echo "ERROR: Stage 2 export completed without expected result: $result" >&2
+        exit 7
+    fi
+done
+echo "Stage 1, Stage 2, inference, evaluation, and ONNX export finished"
+echo "Evaluation results: $evaluation_output"
+echo "ONNX model: $onnx_output"

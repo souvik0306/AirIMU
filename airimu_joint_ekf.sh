@@ -32,9 +32,10 @@ sensor_metadata_root=${SENSOR_METADATA_ROOT:-initial_sensor_biases}
 epochs=${EKF_EPOCHS:-30}
 learning_rate=${EKF_LR:-1e-4}
 cpu_threads=${EKF_CPU_THREADS:-1}
-replay_workers=${EKF_REPLAY_WORKERS:-0}
+replay_workers=${EKF_REPLAY_WORKERS:-4}
 flight_batch_size=${EKF_FLIGHT_BATCH_SIZE:-$((replay_workers > 0 ? replay_workers : 1))}
 feature_cache_mb=${EKF_FEATURE_CACHE_MB:-512}
+replay_backend=${EKF_REPLAY_BACKEND:-compiled}
 default_ekf_device=$device
 if [[ "$replay_workers" != "0" ]]; then default_ekf_device=cpu; fi
 ekf_device=${EKF_DEVICE:-$default_ekf_device}
@@ -66,6 +67,7 @@ echo "Sensor metadata: $sensor_metadata_root"
 echo "Epochs: $epochs; learning rate: $learning_rate"
 echo "ESKF device: $ekf_device (AirIMU network: $device)"
 echo "Replay workers: $replay_workers; threads/worker: 1; flights/Adam step: $flight_batch_size"
+echo "Replay backend: $replay_backend"
 echo "Working directory: $(pwd)"
 echo "Compute node: $(hostname)"
 if command -v nvidia-smi >/dev/null 2>&1; then
@@ -84,6 +86,7 @@ python3 -u train_eskf.py \
 --lr "$learning_rate" \
 --cpu-threads "$cpu_threads" \
 --replay-workers "$replay_workers" \
+--replay-backend "$replay_backend" \
 --flight-batch-size "$flight_batch_size" \
 --feature-cache-mb "$feature_cache_mb"
 

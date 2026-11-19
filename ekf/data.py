@@ -32,6 +32,20 @@ _SEPTEMBER_METADATA_DIRECTORIES = {
     "Yaw": "10th_Sept_AI_Yaw_Rosbags",
 }
 
+_CATEGORY_METADATA_DIRECTORIES = {
+    "T-Lab_10th_September_dataset": _SEPTEMBER_METADATA_DIRECTORIES,
+    "T-Lab_14th_October_dataset": {
+        "High-Dynamic": "14th_Oct_High",
+        "Low-Dynamic": "14th_Oct_Low",
+        "Medium-Dynamic": "14th_Oct_Medium",
+    },
+    "T-Lab_15th_October_dataset": {
+        "High-Dynamic": "15th_Oct_High",
+        "Low-Dynamic": "15th_Oct_Low",
+        "Medium-Dynamic": "15th_Oct_Medium",
+    },
+}
+
 _BIAS_COLUMNS = (
     "accel_bias_x_mps2", "accel_bias_y_mps2", "accel_bias_z_mps2",
     "gyro_bias_x_radps", "gyro_bias_y_radps", "gyro_bias_z_radps",
@@ -47,15 +61,16 @@ def _sensor_metadata_location(flight_id):
             raise ValueError(f"Expected DATASET/GROUP/flight_N, got {flight_id!r}.")
         directory = _DATASET_METADATA_DIRECTORIES[dataset]
         group, flight_name = parts[1:]
-    elif dataset == "T-Lab_10th_September_dataset":
+    elif dataset in _CATEGORY_METADATA_DIRECTORIES:
         if len(parts) != 4:
             raise ValueError(
                 f"Expected DATASET/CATEGORY/GROUP/flight_N, got {flight_id!r}."
             )
         category, group, flight_name = parts[1:]
-        if category not in _SEPTEMBER_METADATA_DIRECTORIES:
+        directories = _CATEGORY_METADATA_DIRECTORIES[dataset]
+        if category not in directories:
             raise KeyError(f"No sensor-metadata mapping for category {category!r}.")
-        directory = _SEPTEMBER_METADATA_DIRECTORIES[category]
+        directory = directories[category]
     else:
         raise KeyError(f"No sensor-metadata mapping for dataset {dataset!r}.")
 
@@ -207,12 +222,14 @@ def prepare_flight(record, cutoff_timestamp, ekf):
     if len(selected) < 2 or float(selected[0, 0]) >= cutoff_timestamp:
         raise ValueError("No valid aided IMU prefix for this flight.")
     terminal_velocity = None
+    terminal_height = None
     if float(selected[-1, 0]) < end:
         # Terminal output at exactly T_e; last real IMU sample is held to T_e.
         upper = int(torch.searchsorted(vicon[:, 0].contiguous(), vicon.new_tensor(end)))
         lower = upper - 1
         weight = (end - vicon[lower, 0]) / (vicon[upper, 0] - vicon[lower, 0])
         terminal_velocity = torch.lerp(vicon[lower, 4:7], vicon[upper, 4:7], weight)
+        terminal_height = torch.lerp(vicon[lower, 3], vicon[upper, 3], weight)
         selected = torch.cat((selected, torch.cat((torch.tensor([end], dtype=torch.float64),
                                                    selected[-1, 1:]))[None]))
     times = selected[:, 0].contiguous()
@@ -233,6 +250,18 @@ def prepare_flight(record, cutoff_timestamp, ekf):
                         "velocity": row[4:7], "yaw": row[7:11]}
         for channel in ekf.observation_types:
             events.append(ViconEvent(timestamp, channel, observations[channel]))
+    if ekf.height_updates:
+        # One clean Vicon-z height update per estimate after initialization,
+        # both before and after cutoff. At an aided timestamp, height follows
+        # the existing position, velocity and yaw updates.
+        # Use the same translated navigation frame as the initialized EKF state.
+        heights = selected_vicon[:, 3]
+        if terminal_height is not None:
+            heights = torch.cat((heights, terminal_height.reshape(1)))
+        events.extend(ViconEvent(timestamp, "height", height.reshape(1))
+                      for timestamp, height in zip(times.tolist(), heights)
+                      if timestamp > float(times[0]))
+        events.sort(key=lambda event: float(event.timestamp))
     gt_velocity = selected_vicon[:, 4:7]
     if terminal_velocity is not None:
         gt_velocity = torch.cat((gt_velocity, terminal_velocity[None]))

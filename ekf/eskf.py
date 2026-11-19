@@ -104,12 +104,14 @@ class DifferentiableESKF(nn.Module):
 
     Scalar gravity selects z-up navigation: [0, 0, -gravity]. For NED pass
     an explicit vector, e.g. gravity=(0, 0, 9.80665), with matching body/pose
-    conventions. Position fusion always uses xy; height fusion is disabled.
+    conventions. Position fusion uses xy. Optional height updates use z only
+    before and after cutoff, independently of the pre-cutoff Vicon channels.
     ``velocity`` enables xyz velocity; ``velocity_xy`` enables horizontal only.
     """
 
     def __init__(self, gravity=9.80665, state_dim=15, dtype=torch.float64,
-                 observation_types=("position", "velocity_xy", "yaw")):
+                 observation_types=("position", "velocity_xy", "yaw"),
+                 height_updates=False):
         super().__init__()
         if state_dim != 15 or dtype != torch.float64:
             raise ValueError("The ESKF requires state_dim=15 and dtype=torch.float64.")
@@ -119,6 +121,7 @@ class DifferentiableESKF(nn.Module):
                 or {"velocity", "velocity_xy"} <= set(observation_types)):
             raise ValueError("Select unique supported Vicon channels and one velocity model.")
         self.observation_types = tuple(observation_types)
+        self.height_updates = bool(height_updates)
         gravity_vector = [0., 0., -float(gravity)] if isinstance(gravity, (int, float)) else gravity
         g = torch.as_tensor(gravity_vector, dtype=dtype).detach().clone()
         _finite_shape(g, (3,), "gravity")
@@ -130,6 +133,7 @@ class DifferentiableESKF(nn.Module):
         self.register_buffer("velocity_xy_R", torch.eye(2, dtype=dtype) * .05**2)
         self.register_buffer("velocity_R", torch.eye(3, dtype=dtype) * .05**2)
         self.register_buffer("yaw_R", torch.tensor([[math.radians(2)**2]], dtype=dtype))
+        self.register_buffer("height_R", torch.tensor([[.1**2]], dtype=dtype))
         self.register_buffer("innovation_jitter", torch.tensor(1e-9, dtype=dtype))
         self.register_buffer("_eye15", torch.eye(15, dtype=dtype), persistent=False)
 
@@ -231,6 +235,13 @@ class DifferentiableESKF(nn.Module):
         return self.propagate_nominal_state(state, acceleration, gyroscope, dt), P_pred
 
     def measurement_model(self, state, observation, observation_type, *, yaw_validity=None):
+        if observation_type == "height":
+            if not self.height_updates:
+                raise ValueError("Height updates are not enabled.")
+            observation = _tensor(observation, state.position)
+            if observation.numel() != 1:
+                raise ValueError("Height observation must be a scalar z position.")
+            return observation.reshape(1) - state.position[2:3], self._eye15[2:3]
         if observation_type not in self.observation_types:
             raise ValueError(f"Vicon channel {observation_type!r} is not enabled.")
         observation = _tensor(observation, state.position)
@@ -320,6 +331,8 @@ class DifferentiableESKF(nn.Module):
                 valid = shape in ((2,), (3,))
             elif channel in ("velocity", "velocity_xy"):
                 valid = shape in ((3,),) if channel == "velocity" else shape in ((2,), (3,))
+            elif channel == "height":
+                valid = observation.numel() == 1
             else:
                 valid = shape == (4,) or observation.numel() == 1
             if not valid:
@@ -350,8 +363,10 @@ class DifferentiableESKF(nn.Module):
         interval. Each subinterval uses its actual dt for increment noise.
         Output includes the initial state and has one row per IMU timestamp.
         Timestamp scheduling is fixed and must not require gradients.
-        With return_covariance=False, omit covariance history and its unused
-        propagation after cutoff. Nominal states and their gradients are retained.
+        With return_covariance=False, omit covariance history only. Covariance
+        propagation and gradients continue through every replayed interval.
+        When enabled, height observations are fused before and after cutoff;
+        all other Vicon observations are fused strictly before cutoff.
         """
         if self.gravity.dtype != torch.float64:
             raise ValueError("Filter buffers must remain Float64.")
@@ -403,10 +418,22 @@ class DifferentiableESKF(nn.Module):
                 raise ValueError("Repeated Vicon channel at the same timestamp.")
             seen.add(key)
             previous_time = timestamp
-            if schedule[0] <= timestamp < cutoff and timestamp <= schedule[-1]:
+            if event.observation_type == "height":
+                if not self.height_updates:
+                    raise ValueError("Height events require height_updates=True.")
+                if schedule[0] <= timestamp <= schedule[-1]:
+                    events.append(event)
+            elif schedule[0] <= timestamp < cutoff and timestamp <= schedule[-1]:
                 if event.observation_type not in self.observation_types:
                     raise ValueError(f"Unexpected Vicon channel: {event.observation_type}.")
                 events.append(event)
+        if (self.height_updates
+                and not any(event.observation_type == "height" for event in events)):
+            raise ValueError("Height updates are enabled but no height events were supplied.")
+        if (self.height_updates and schedule[-1] >= cutoff
+                and not any(event.observation_type == "height" and float(event.timestamp) >= cutoff
+                            for event in events)):
+            raise ValueError("Height updates are enabled but no post-cutoff height events were supplied.")
         events = self._prepare_observations(events)
         boundaries = sorted(set(schedule).union(float(event.timestamp) for event in events))
         durations = sorted({end-start for start, end in zip(boundaries, boundaries[1:])})
@@ -436,9 +463,6 @@ class DifferentiableESKF(nn.Module):
 
         def propagate(current_state, current_P, sample, start, end):
             dt = device_durations[end - start]
-            if not return_covariance and start >= cutoff:
-                return self.propagate_nominal_state(current_state, imu[sample, :3],
-                                                    imu[sample, 3:], dt), current_P
             return self._predict(current_state, current_P, imu[sample, :3],
                                  imu[sample, 3:], variance[sample], dt)
 

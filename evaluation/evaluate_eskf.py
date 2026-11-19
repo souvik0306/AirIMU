@@ -13,7 +13,7 @@ import torch
 
 from ekf import DifferentiableESKF, velocity_evaluation_mask
 from ekf.data import apply_sensor_metadata, prepare_flight, read_dataset_flights
-from ekf.experiment import covariance_statistics, load_airimu, xy_metrics
+from ekf.experiment import covariance_statistics, filter_metadata, load_airimu, xy_metrics
 
 
 def main():
@@ -33,6 +33,8 @@ def main():
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--ekf-device", help="Filter device; defaults to --device")
     parser.add_argument("--cpu-threads", type=int, default=1)
+    parser.add_argument("--height-updates", action=argparse.BooleanOptionalAction, default=None,
+                        help="Height aiding before and after cutoff; default: checkpoint policy, enabled for fixed noise")
     args = parser.parse_args()
     if bool(args.config) != bool(args.ckpt):
         parser.error("Pass both --config and --ckpt, or neither for fixed noise.")
@@ -46,7 +48,16 @@ def main():
         parser.error(f"No flights in split={args.split}.")
     flights, cutoffs = apply_sensor_metadata(flights, args.sensor_metadata_root)
     ekf_device = args.ekf_device or args.device
-    ekf = DifferentiableESKF(gravity=args.gravity).to(ekf_device)
+    height_updates = args.height_updates
+    if height_updates is None:
+        if args.ckpt:
+            checkpoint = torch.load(args.ckpt, map_location="cpu", weights_only=True)
+            height_updates = bool(checkpoint.get("ekf_metadata", {}).get("height_updates", False))
+            del checkpoint
+        else:
+            height_updates = True
+    ekf = DifferentiableESKF(gravity=args.gravity, height_updates=height_updates).to(ekf_device)
+    print(f"Filter aiding policy: {json.dumps(filter_metadata(ekf))}", flush=True)
     wrapper = load_airimu(args.config, args.ckpt, ekf, args.device) if args.ckpt else None
     if wrapper:
         wrapper.eval()
@@ -77,6 +88,9 @@ def main():
                       "evaluation_end": cutoff+25., "gravity": list(args.gravity),
                       "observation_types": list(ekf.observation_types),
                       "network_device": args.device, "ekf_device": ekf_device,
+                      **filter_metadata(ekf),
+                      "height_update_count": sum(event.observation_type == "height"
+                                                 for event in flight["vicon_events"]),
                       "covariance": covariance_statistics(variance),
                       "ekf_vs_vicon": xy_metrics(trajectory["velocity"], flight["vicon_velocity_gt"], mask)}
             artifact_name = f"flight_{index:04d}.pt"
@@ -93,6 +107,8 @@ def main():
             del trajectory, flight, variance
     with (output_dir / "metrics.json").open("w", encoding="utf-8") as handle:
         json.dump(reports, handle, indent=2)
+    from evaluation.plot_eskf import plot_evaluation
+    plot_evaluation(output_dir)
 
 
 if __name__ == "__main__":
