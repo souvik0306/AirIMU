@@ -190,7 +190,7 @@ from the filter's original performance bottleneck.
 **Mixed PyTorch and Triton packages.** User-installed packages could override
 the container's compiler packages, producing an incompatible environment and an
 `AttrsDescriptor` import error. The launcher now uses
-[scripts/container_python.py](../scripts/container_python.py) with Python's
+[jobs/utils/container_python.py](../jobs/utils/container_python.py) with Python's
 automatic user-site loading disabled. Container packages take priority, while
 additional dependencies remain available. The successful benchmark used
 PyTorch `2.5.0+cu124`. Compatibility handling for `typing_extensions` and protobuf
@@ -283,15 +283,15 @@ not include those additions, and the completed 20-epoch model predates them.
 | [ekf/runner.py](../ekf/runner.py) | Feature cache, GPU head batches and optimizer coordination |
 | [ekf/training.py](../ekf/training.py) | Frozen feature extraction and covariance-head training |
 | [train_eskf.py](../train_eskf.py) | Training entry point, provenance and epoch statistics |
-| [scripts/container_python.py](../scripts/container_python.py) | Container package priority and dependency compatibility |
-| [tests/test_compiled_eskf.py](../tests/test_compiled_eskf.py) | Forward, backward and validation regression checks |
-| [benchmarks/benchmark_eskf.py](../benchmarks/benchmark_eskf.py) | CPU/GPU timing and real-flight reference comparison |
-| [airimu_ekf_benchmark.pbs](../airimu_ekf_benchmark.pbs) | Correctness checks and two-epoch benchmark |
-| [airimu_ekf_train_export.pbs](../airimu_ekf_train_export.pbs) | Prepared-input training followed by inference, evaluation and export |
+| [jobs/utils/container_python.py](../jobs/utils/container_python.py) | Container package priority and dependency compatibility |
+| [ekf/tests/test_compiled_eskf.py](../ekf/tests/test_compiled_eskf.py) | Forward, backward and validation regression checks |
+| [ekf/benchmarks/benchmark_eskf.py](../ekf/benchmarks/benchmark_eskf.py) | CPU/GPU timing and real-flight reference comparison |
+| [airimu_ekf_benchmark.pbs](../jobs/pbs/ekf/airimu_ekf_benchmark.pbs) | Correctness checks and two-epoch benchmark |
+| [airimu_ekf_train_export.pbs](../jobs/pbs/ekf/airimu_ekf_train_export.pbs) | Prepared-input training followed by inference, evaluation and export |
 
 The completed benchmark's source evidence is available here:
 
-- [PBS output](../airimu_ekf_bench.o1586065).
+- [PBS output](../jobs/logs/ekf/airimu_ekf_bench.o1586065).
 - [Replay benchmark and gradient comparison](../experiments/20261118_215734_SGT_job1586065_ekf_benchmark/replay_benchmark.json).
 - [Epoch metrics](../experiments/20261118_215734_SGT_job1586065_ekf_benchmark/training/metrics.jsonl).
 - [Checkpoint, runtime and flight provenance](../experiments/20261118_215734_SGT_job1586065_ekf_benchmark/training/eskf_metadata.json).
@@ -300,7 +300,7 @@ The completed benchmark's source evidence is available here:
 In the validated container environment, the main runtime settings are:
 
 ```bash
-python3 -s -u scripts/container_python.py train_eskf.py \
+python3 -s -u jobs/utils/container_python.py train_eskf.py \
   --config /path/to/matching/stage2.conf \
   --ckpt /path/to/stage2/best_model.ckpt \
   --dataset-config /path/to/dataset.conf \

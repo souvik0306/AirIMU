@@ -1,4 +1,4 @@
-"""Acceptance checks: python -m unittest discover -s tests -v."""
+"""Acceptance checks: python -m unittest discover -s ekf/tests -v."""
 
 import contextlib
 import io

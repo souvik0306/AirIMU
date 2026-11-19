@@ -1,0 +1,290 @@
+{
+  "moved_files": [
+    {
+      "old_path": "airimu_ekf20_export.o1589404",
+      "new_path": "jobs/logs/ekf/airimu_ekf20_export.o1589404",
+      "kind": "scheduler_log",
+      "bytes": 3847205,
+      "original_sha256": "75dd8fcf3bcdb242fff394ac2c11c79dd49e04f1fc9ee2067abdff2461e6c74f",
+      "current_sha256": "75dd8fcf3bcdb242fff394ac2c11c79dd49e04f1fc9ee2067abdff2461e6c74f",
+      "previous_locations": [
+        "jobs/logs/airimu_ekf20_export.o1589404"
+      ]
+    },
+    {
+      "old_path": "airimu_ekf_bench.o1583227",
+      "new_path": "jobs/logs/ekf/airimu_ekf_bench.o1583227",
+      "kind": "scheduler_log",
+      "bytes": 32277,
+      "original_sha256": "fe5f96de439549e0d7e1197d3ec181e30ea5164a1d2772008196623ae640fb35",
+      "current_sha256": "fe5f96de439549e0d7e1197d3ec181e30ea5164a1d2772008196623ae640fb35",
+      "previous_locations": [
+        "jobs/logs/airimu_ekf_bench.o1583227"
+      ]
+    },
+    {
+      "old_path": "airimu_ekf_bench.o1586065",
+      "new_path": "jobs/logs/ekf/airimu_ekf_bench.o1586065",
+      "kind": "scheduler_log",
+      "bytes": 251617,
+      "original_sha256": "f776722c66e487ff7efc77195053fcf6c69fcc6a1489bceb8b364a3451849a95",
+      "current_sha256": "f776722c66e487ff7efc77195053fcf6c69fcc6a1489bceb8b364a3451849a95",
+      "previous_locations": [
+        "jobs/logs/airimu_ekf_bench.o1586065"
+      ]
+    },
+    {
+      "old_path": "airimu_ekf_bench.o1591704",
+      "new_path": "jobs/logs/ekf/airimu_ekf_bench.o1591704",
+      "kind": "scheduler_log",
+      "bytes": 259608,
+      "original_sha256": "7281a9b49d9c4a07369acf1b684f1176acf2c14818d6665a13b7d7818868e384",
+      "current_sha256": "7281a9b49d9c4a07369acf1b684f1176acf2c14818d6665a13b7d7818868e384",
+      "previous_locations": [
+        "jobs/logs/airimu_ekf_bench.o1591704"
+      ]
+    },
+    {
+      "old_path": "airimu_ekf_benchmark.pbs",
+      "new_path": "jobs/pbs/ekf/airimu_ekf_benchmark.pbs",
+      "kind": "pbs",
+      "bytes": 3933,
+      "original_sha256": "f89bbfd778753f15e86e64b99d24626abf589c5ffce57b02722bca9f6290f93d",
+      "current_sha256": "f218a553415d1f09bf4fbd9c3671b5c3e481e87dde486bedecc5b9bbfb9db6a1",
+      "previous_locations": [
+        "jobs/pbs/airimu_ekf_benchmark.pbs"
+      ]
+    },
+    {
+      "old_path": "airimu_ekf_check.o1585428",
+      "new_path": "jobs/logs/ekf/airimu_ekf_check.o1585428",
+      "kind": "scheduler_log",
+      "bytes": 611,
+      "original_sha256": "27518d711441d1eb7cfcb294fec76de5f78395153fa7dff94d8b555c1db00725",
+      "current_sha256": "27518d711441d1eb7cfcb294fec76de5f78395153fa7dff94d8b555c1db00725",
+      "previous_locations": [
+        "jobs/logs/airimu_ekf_check.o1585428"
+      ]
+    },
+    {
+      "old_path": "airimu_ekf_train_export.pbs",
+      "new_path": "jobs/pbs/ekf/airimu_ekf_train_export.pbs",
+      "kind": "pbs",
+      "bytes": 7523,
+      "original_sha256": "6ff6705e9887e906bdf95a1513745a8ef3092ff870ab5ff2032e291cc6fef77b",
+      "current_sha256": "a9e00ccb8c4c09a78c27e186373c81a5e46fc215d6c9f3941627ac7006127a95",
+      "previous_locations": [
+        "jobs/pbs/airimu_ekf_train_export.pbs"
+      ]
+    },
+    {
+      "old_path": "airimu_finetune.pbs",
+      "new_path": "jobs/pbs/stage12/airimu_finetune.pbs",
+      "kind": "pbs",
+      "bytes": 2431,
+      "original_sha256": "12700a86827c6e6a771bdf1ab8aa161bcaca71077628bde5a2829b95cfaf73ba",
+      "current_sha256": "fd21ee8e088fb029d25364de3c94a7d8dba494f8bc77db688d48669206507973",
+      "previous_locations": [
+        "jobs/pbs/airimu_finetune.pbs"
+      ]
+    },
+    {
+      "old_path": "airimu_finetune.sh",
+      "new_path": "jobs/local/stage12/airimu_finetune.sh",
+      "kind": "local",
+      "bytes": 3623,
+      "original_sha256": "8330585e23c91d9cba8faf2575a283cae0c453eefca5cbfcffc5edbda909b695",
+      "current_sha256": "0e856f03925ae90117f4e905c5407fb6fc0d706709fa0b51d916b157bc581f61",
+      "previous_locations": [
+        "jobs/local/airimu_finetune.sh"
+      ]
+    },
+    {
+      "old_path": "airimu_joint_ekf.pbs",
+      "new_path": "jobs/pbs/ekf/airimu_joint_ekf.pbs",
+      "kind": "pbs",
+      "bytes": 7193,
+      "original_sha256": "37e9091666d772cfedaf17babaf142a5808ad0ec3560daae278cc23e6ae7545f",
+      "current_sha256": "a5a27d842e9ad7e40f99be1ad211d11ebd70ab3f467fbb142bbb592f9c1cb976",
+      "previous_locations": [
+        "jobs/pbs/airimu_joint_ekf.pbs"
+      ]
+    },
+    {
+      "old_path": "airimu_joint_ekf.sh",
+      "new_path": "jobs/local/ekf/airimu_joint_ekf.sh",
+      "kind": "local",
+      "bytes": 4425,
+      "original_sha256": "dd2458878f960b6fbd76aef84912eda2811f05026dca388cc3e3b7c26caff27d",
+      "current_sha256": "98cf18bb3090e5afb9a79e702382aa766c26507d7c840b1464a1bac7670a1849",
+      "previous_locations": [
+        "jobs/local/airimu_joint_ekf.sh"
+      ]
+    },
+    {
+      "old_path": "airimu_oct_stage1.o1584583",
+      "new_path": "jobs/logs/stage12/airimu_oct_stage1.o1584583",
+      "kind": "scheduler_log",
+      "bytes": 2493226,
+      "original_sha256": "dd1fb7d41355133fc047930a65ab4e7efcc33cacdb4b08f04c363258e8197b7c",
+      "current_sha256": "dd1fb7d41355133fc047930a65ab4e7efcc33cacdb4b08f04c363258e8197b7c",
+      "previous_locations": [
+        "jobs/logs/airimu_oct_stage1.o1584583"
+      ]
+    },
+    {
+      "old_path": "airimu_oct_stage2.o1584584",
+      "new_path": "jobs/logs/stage12/airimu_oct_stage2.o1584584",
+      "kind": "scheduler_log",
+      "bytes": 7717919,
+      "original_sha256": "6fa731bebdcbb3609f1d43ade5f18264b51fb7f84ebf5e33d9f328b05b23c900",
+      "current_sha256": "6fa731bebdcbb3609f1d43ade5f18264b51fb7f84ebf5e33d9f328b05b23c900",
+      "previous_locations": [
+        "jobs/logs/airimu_oct_stage2.o1584584"
+      ]
+    },
+    {
+      "old_path": "airimu_scratch.pbs",
+      "new_path": "jobs/pbs/stage12/airimu_scratch.pbs",
+      "kind": "pbs",
+      "bytes": 2714,
+      "original_sha256": "cd6f54de571154cbe1a3ed8f1ff27caec2e758cc8e670e85e8112afaa1f9d487",
+      "current_sha256": "5dc638be11bd770c0549e7e34ce4a7dc6df743ee63b72a10277630d9d1fb41e6",
+      "previous_locations": [
+        "jobs/pbs/airimu_scratch.pbs"
+      ]
+    },
+    {
+      "old_path": "airimu_scratch.sh",
+      "new_path": "jobs/local/stage12/airimu_scratch.sh",
+      "kind": "local",
+      "bytes": 3591,
+      "original_sha256": "823eb7a50ac6a8cc389212f951bc1b3ddb927a93e28c5fc96701ff3f0a7f39a1",
+      "current_sha256": "ed832ac585869cde618aaab947fbb4fd2cb41bdd2756bb8abf331607193a6d7d",
+      "previous_locations": [
+        "jobs/local/airimu_scratch.sh"
+      ]
+    },
+    {
+      "old_path": "airimu_stage12_export.pbs",
+      "new_path": "jobs/pbs/stage12/airimu_stage12_export.pbs",
+      "kind": "pbs",
+      "bytes": 5123,
+      "original_sha256": "4b811d7936180a6fcd0e45d2be3f59b512f133b5e93e3749739f203f25dae7f6",
+      "current_sha256": "452dfd9a911a5934e6e46862ad1ead5c1904adce6b71c7881dcbe7cb1854baeb",
+      "previous_locations": [
+        "jobs/pbs/airimu_stage12_export.pbs"
+      ]
+    },
+    {
+      "old_path": "evaluate_stage2_ekf.pbs",
+      "new_path": "jobs/pbs/evaluation/evaluate_stage2_ekf.pbs",
+      "kind": "pbs",
+      "bytes": 2209,
+      "original_sha256": "a4f9d10afabeeb796e16aae8e93c0baef9870d087015e94c3d9c68ac5d6aeb9b",
+      "current_sha256": "b9b013c86985a3c981bef81f9a9cbbd6062fe568f338ba9c5e5c696cb1a7134c",
+      "previous_locations": [
+        "jobs/pbs/evaluate_stage2_ekf.pbs"
+      ]
+    },
+    {
+      "old_path": "setup_airimu.sh",
+      "new_path": "jobs/setup/setup_airimu.sh",
+      "kind": "setup",
+      "bytes": 3362,
+      "original_sha256": "a9594c6d001f5eb1e9a5a5bca2496d4ecc320949df20baaee9ee313108de2249",
+      "current_sha256": "a0b6ea4068e874b6e17d3aebe24f7bf7a6615aec01926a0a5954dea08894cf8b"
+    },
+    {
+      "old_path": "setup_airimu_ens.sh",
+      "new_path": "jobs/setup/setup_airimu_ens.sh",
+      "kind": "setup",
+      "bytes": 7549,
+      "original_sha256": "3e1515b1bf22800f53a92a39f9f3a0b8d95643139d6f58f55e57bfa057f6ac2d",
+      "current_sha256": "5427b63a3193036e457ede407d3d83c40cf94beb5e7beef8ae4d447e246acff2"
+    },
+    {
+      "old_path": "scripts/container_python.py",
+      "new_path": "jobs/utils/container_python.py",
+      "kind": "python_utility",
+      "bytes": 2523,
+      "original_sha256": "e49cb0bd8a64eddd53cc4e8b7f906e8204c3438dfe41e90747aefb924d59b4fc",
+      "current_sha256": "f320deb865fdff263659d4604b620ad56a370138e5f9bebe5048c1c53d0113c6"
+    },
+    {
+      "old_path": "scripts/prepare_stage12_run.py",
+      "new_path": "jobs/utils/prepare_stage12_run.py",
+      "kind": "python_utility",
+      "bytes": 6604,
+      "original_sha256": "69a1f701832fdfa347cf609fcb85e8c340395278bf3d6da95d2d587d69f2127c",
+      "current_sha256": "69a1f701832fdfa347cf609fcb85e8c340395278bf3d6da95d2d587d69f2127c"
+    },
+    {
+      "old_path": "scripts/prepare_ekf_run.py",
+      "new_path": "ekf/scripts/prepare_ekf_run.py",
+      "kind": "python_utility",
+      "bytes": 8377,
+      "original_sha256": "9ea473a4fc33293bbbeb68b067f9877a08c58915c9741c8798ee415e1d74c5f3",
+      "current_sha256": "ad6ffd8942e5d45fef03334f044e35e2f59dc5fcdd9fc4e6b18022e5acac9c59"
+    },
+    {
+      "old_path": "benchmarks/benchmark_eskf.py",
+      "new_path": "ekf/benchmarks/benchmark_eskf.py",
+      "kind": "python_utility",
+      "bytes": 6653,
+      "original_sha256": "4b82e83fd7015fb18fea54a57d6c32e3ec3737dd5e3a184e43df97a2f8953bd9",
+      "current_sha256": "4b82e83fd7015fb18fea54a57d6c32e3ec3737dd5e3a184e43df97a2f8953bd9"
+    },
+    {
+      "old_path": "tests/check_ekf_flow.py",
+      "new_path": "ekf/tests/check_ekf_flow.py",
+      "kind": "ekf_test",
+      "bytes": 6186,
+      "original_sha256": "44a4cc321349bbdf2558dde9112a230f8b5d174edc3a147995b7365d605a1c9e",
+      "current_sha256": "44a4cc321349bbdf2558dde9112a230f8b5d174edc3a147995b7365d605a1c9e"
+    },
+    {
+      "old_path": "tests/test_compiled_eskf.py",
+      "new_path": "ekf/tests/test_compiled_eskf.py",
+      "kind": "ekf_test",
+      "bytes": 3633,
+      "original_sha256": "12b62424903567f98de743adf9fde30246b043d887e3274704776c27e6d525bf",
+      "current_sha256": "12b62424903567f98de743adf9fde30246b043d887e3274704776c27e6d525bf"
+    },
+    {
+      "old_path": "tests/test_differentiable_eskf.py",
+      "new_path": "ekf/tests/test_differentiable_eskf.py",
+      "kind": "ekf_test",
+      "bytes": 30739,
+      "original_sha256": "6cdf5dc2f7cdcca8a34a34ed6f2ec96f872d501060b01a56d7bacfdb3b7514ff",
+      "current_sha256": "8eb14d3f2b1ffbfe7bfc9f41f9079f8c4f25275d15cdc42600df3e0a16656152"
+    },
+    {
+      "old_path": "tests/test_eskf_data.py",
+      "new_path": "ekf/tests/test_eskf_data.py",
+      "kind": "ekf_test",
+      "bytes": 8873,
+      "original_sha256": "35d699005ece3f3f4ae4e9c2e0b74e9d5fd0204e5505ee8020550b1a0030a992",
+      "current_sha256": "35d699005ece3f3f4ae4e9c2e0b74e9d5fd0204e5505ee8020550b1a0030a992"
+    },
+    {
+      "old_path": "tests/test_height_eskf.py",
+      "new_path": "ekf/tests/test_height_eskf.py",
+      "kind": "ekf_test",
+      "bytes": 14798,
+      "original_sha256": "2922f9b3135897f43a806d621b0be4ea700c29db2a57ff33e69ae6a411e0aee5",
+      "current_sha256": "2922f9b3135897f43a806d621b0be4ea700c29db2a57ff33e69ae6a411e0aee5"
+    }
+  ],
+  "latest_layout": "Jobs grouped by workflow; EKF-only tests and utilities colocated under ekf.",
+  "validation": {
+    "ekf_cpu_tests_passed": 51,
+    "cuda_tests_skipped_on_login_node": 3,
+    "test_seconds": 156.269,
+    "preparation_and_benchmark_import_help_checks": 3,
+    "submission_forms_verified_without_submission": 21,
+    "shell_and_pbs_syntax_checks": 13,
+    "original_scheduler_logs_byte_identical": 7,
+    "test_log": "jobs/logs/ekf/layout_validation.log"
+  }
+}

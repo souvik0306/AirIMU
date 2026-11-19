@@ -312,7 +312,7 @@ Here `vicon_events` must include height observations before and after cutoff. Th
 loader generates these automatically at the estimate timestamps.
 
 ```bash
-python -m unittest discover -s tests -v
+python -m unittest discover -s ekf/tests -v
 ```
 
 The suite covers initialization, gravity, quaternion and bias propagation,
@@ -346,7 +346,7 @@ To compare the compiled CPU and A40 paths, check a complete real flight against
 the reference loss and variance gradient, and train **two complete epochs**:
 
 ```bash
-qsub airimu_ekf_benchmark.pbs
+qsub jobs/pbs/ekf/airimu_ekf_benchmark.pbs
 ```
 
 The benchmark uses the free GPU queue and an existing Stage 2 checkpoint. It
@@ -403,7 +403,7 @@ and `validation_covariance` in `training/metrics.jsonl`. Epoch losses and elapse
 time are printed alongside them. Terminal output is captured in `job.log` and
 the PBS output log.
 
-The PBS launcher uses `python3 -s scripts/container_python.py` to give the
+The PBS launcher uses `python3 -s jobs/utils/container_python.py` to give the
 container's matched PyTorch/Triton packages priority over user-installed packages.
 User dependencies such as PyPose and HOCON remain available after the container
 packages. This avoids the incompatible Triton `AttrsDescriptor` error observed

@@ -1,38 +1,33 @@
 #PBS -S /bin/bash
 #PBS -q auto_free
 #PBS -j oe
-#PBS -N airimu_scratch
+#PBS -o jobs/logs/stage12/
+#PBS -e jobs/logs/stage12/
+#PBS -N airimu_finetune
 #PBS -l walltime=24:00:00
 #PBS -l select=1:ncpus=36:mem=250gb:ngpus=1
 
-# Submit with: qsub airimu_scratch.pbs
+# Submit with: qsub jobs/pbs/stage12/airimu_finetune.pbs
 
 set -e
 
-cd $PBS_O_WORKDIR
+cd "$PBS_O_WORKDIR"
 
 module load apptainer/1.4.1
 
 image=/app1/common/singularity-img/vanda/pytorch_2.5_cuda_12.4_unsloth.sif
 
-stage1_config=configs/exp/TLab/4th_Nov_Scratch.conf
-stage2_config=configs/exp/TLab/4th_Nov_Scratch_stage2.conf
-
-# Optional: qsub -v MAX_EPOCHES=15 airimu_scratch.pbs to shorten both stages
-# for a quick validation run. Unset by default so a bare `qsub` keeps the
-# config's own max_epoches.
-max_epoches_args=()
-if [[ -n "${MAX_EPOCHES:-}" ]]; then
-    max_epoches_args=(--max_epoches "$MAX_EPOCHES")
-fi
+stage1_config=configs/exp/TLab/finetune_motion_body.conf
+stage2_config=configs/exp/TLab/finetune_motion_body_stage2.conf
+stage1_pretrained=./AirIMU_EuRoC/best_model.ckpt
 
 run_timestamp=$(TZ=Asia/Singapore date +%Y%m%d_%H%M%S_SGT)
 job_id=${PBS_JOBID%%.*}
-run_root="experiments/${run_timestamp}_job${job_id}/scratch"
+run_root="experiments/${run_timestamp}_job${job_id}/finetune"
 stage1_exp="$run_root/stage1"
 stage2_exp="$run_root/stage2"
 
-echo "Training mode: scratch"
+echo "Training mode: finetune"
 echo "Run root: $run_root"
 
 echo "Working directory:"
@@ -44,15 +39,14 @@ hostname
 echo "GPU:"
 nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
 
-echo "Starting AirIMU Stage 1 from scratch (covaug=False)"
+echo "Starting AirIMU Stage 1 (covaug=False)"
 
 apptainer exec --nv -e $image \
 python3 -u train_motion_finetune.py \
 --config "$stage1_config" \
 --exp_dir "$stage1_exp" \
---pretrained_ckpt none \
---device cuda:0 \
-"${max_epoches_args[@]}"
+--pretrained_ckpt "$stage1_pretrained" \
+--device cuda:0
 
 echo "Stage 1 finished. Starting Stage 2 (covaug=True)"
 
@@ -67,8 +61,7 @@ python3 -u train_motion_finetune.py \
 --exp_dir "$stage2_exp" \
 --pretrained_ckpt "$stage1_exp/ckpt/best_model.ckpt" \
 --non_strict_pretrained \
---device cuda:0 \
-"${max_epoches_args[@]}"
+--device cuda:0
 
 echo "Stage 2 finished. Running inference and evaluation"
 
@@ -95,8 +88,8 @@ apptainer exec -e $image \
 python3 -u export_onnx_fp32.py \
 --config "$stage2_config" \
 --ckpt "$stage2_exp/ckpt/best_model.ckpt" \
---onnx "$stage2_exp/airimu_cpu_fp32_scratch.onnx" \
+--onnx "$stage2_exp/airimu_cpu_fp32_finetuned.onnx" \
 --torch "$stage2_exp/airimu_cpu_fp32.pt" \
 --num-imu-frames 200
 
-echo "AirIMU scratch training and ONNX export finished"
+echo "AirIMU fine-tuning and ONNX export finished"

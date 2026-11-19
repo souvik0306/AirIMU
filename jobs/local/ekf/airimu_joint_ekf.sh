@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 
 # Run the joint EKF PBS workflow directly on a Linux/ENS machine.
-# Run setup_airimu_ens.sh first, then: ./airimu_joint_ekf.sh
+# Run jobs/setup/setup_airimu_ens.sh first, then: ./jobs/local/ekf/airimu_joint_ekf.sh
 # Set AIRIMU_CKPT to the Stage 2 checkpoint for covariance-only fine-tuning.
-# Overrides match airimu_joint_ekf.pbs; also supports VENV_DIR and DEVICE.
-# Example: EKF_EPOCHS=10 DEVICE=cuda:0 ./airimu_joint_ekf.sh
+# Overrides match jobs/pbs/ekf/airimu_joint_ekf.pbs; also supports VENV_DIR and DEVICE.
+# Example: EKF_EPOCHS=10 DEVICE=cuda:0 ./jobs/local/ekf/airimu_joint_ekf.sh
 
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")"
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.."
 VENV_DIR="${VENV_DIR:-}"
 if [[ -z "$VENV_DIR" ]]; then
     if [[ -f .venv311/bin/activate ]]; then
@@ -18,7 +18,7 @@ if [[ -z "$VENV_DIR" ]]; then
     fi
 fi
 if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
-    echo "ERROR: No virtual environment found at $VENV_DIR. Run setup_airimu_ens.sh first, or set VENV_DIR to your environment path." >&2
+    echo "ERROR: No virtual environment found at $VENV_DIR. Run jobs/setup/setup_airimu_ens.sh first, or set VENV_DIR to your environment path." >&2
     exit 1
 fi
 source "$VENV_DIR/bin/activate"

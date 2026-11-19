@@ -1,13 +1,15 @@
 #PBS -S /bin/bash
 #PBS -q auto_free
 #PBS -j oe
+#PBS -o jobs/logs/evaluation/
+#PBS -e jobs/logs/evaluation/
 #PBS -N airimu_stage2_eval
 #PBS -l walltime=04:00:00
 #PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
 
-# Generate the same inference and evaluation plots as airimu_scratch.pbs
+# Generate the same inference and evaluation plots as jobs/pbs/stage12/airimu_scratch.pbs
 # using the saved Stage 2 checkpoint.
-# Submit with: qsub evaluate_stage2_ekf.pbs
+# Submit with: qsub jobs/pbs/evaluation/evaluate_stage2_ekf.pbs
 # Override STAGE2_RUN_ROOT, STAGE2_EVAL_OUTPUT, or EKF_EVAL_DEVICE with qsub -v.
 set -euo pipefail
 cd "$PBS_O_WORKDIR"

@@ -2,7 +2,7 @@
 
 set -e
 
-cd ~/AirIMU
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.."
 
 echo "========================================"
 echo "AirIMU setup"

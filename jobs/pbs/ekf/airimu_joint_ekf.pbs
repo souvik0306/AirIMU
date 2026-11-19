@@ -1,14 +1,16 @@
 #PBS -S /bin/bash
 #PBS -q auto_free
 #PBS -j oe
+#PBS -o jobs/logs/ekf/
+#PBS -e jobs/logs/ekf/
 #PBS -N airimu_joint_ekf
 #PBS -l walltime=24:00:00
 #PBS -l select=1:ncpus=36:mem=250gb:ngpus=1
 
 # Submit with:
-#   qsub airimu_joint_ekf.pbs
+#   qsub jobs/pbs/ekf/airimu_joint_ekf.pbs
 # Override inputs or runtime settings with:
-#   qsub -v EKF_DATASET_CONFIG=/absolute/path/tlab_body.conf,EKF_EPOCHS=30 airimu_joint_ekf.pbs
+#   qsub -v EKF_DATASET_CONFIG=/absolute/path/tlab_body.conf,EKF_EPOCHS=30 jobs/pbs/ekf/airimu_joint_ekf.pbs
 # AIRIMU_MAX_EPOCHES is optional; when unset, Stage 1 and Stage 2 use their
 # full configured epoch counts. It is intended only for short flow checks.
 
@@ -121,7 +123,7 @@ apptainer exec --nv -e --env PYTHONNOUSERSITE=1 \
 --env "TORCHINDUCTOR_CACHE_DIR=$inductor_cache" \
 --env TORCHINDUCTOR_FX_GRAPH_CACHE=1,TORCHINDUCTOR_COMPILE_THREADS=1 \
 --env OMP_NUM_THREADS=1,MKL_NUM_THREADS=1,OPENBLAS_NUM_THREADS=1 "$image" \
-python3 -s -u scripts/container_python.py train_eskf.py \
+python3 -s -u jobs/utils/container_python.py train_eskf.py \
 --config "$stage2_config" \
 --ckpt "$stage2_checkpoint" \
 --dataset-config "$dataset_config" \

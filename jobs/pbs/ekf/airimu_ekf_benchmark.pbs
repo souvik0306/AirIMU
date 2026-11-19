@@ -1,14 +1,16 @@
 #PBS -S /bin/bash
 #PBS -q auto_free
 #PBS -j oe
+#PBS -o jobs/logs/ekf/
+#PBS -e jobs/logs/ekf/
 #PBS -N airimu_ekf_bench
 #PBS -l walltime=01:00:00
 #PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
 
 # Two complete EKF epochs; uses an existing Stage 2 checkpoint.
-# qsub airimu_ekf_benchmark.pbs
+# qsub jobs/pbs/ekf/airimu_ekf_benchmark.pbs
 # CUDA regression checks only (no training):
-# qsub -l select=1:ncpus=2:mem=16gb:ngpus=1 -l walltime=00:10:00 -v EKF_CHECK_ONLY=1 airimu_ekf_benchmark.pbs
+# qsub -l select=1:ncpus=2:mem=16gb:ngpus=1 -l walltime=00:10:00 -v EKF_CHECK_ONLY=1 jobs/pbs/ekf/airimu_ekf_benchmark.pbs
 set -euo pipefail
 cd "$PBS_O_WORKDIR"
 module load apptainer/1.4.1
@@ -39,20 +41,20 @@ run_python() {
         --env OMP_NUM_THREADS=1,MKL_NUM_THREADS=1,OPENBLAS_NUM_THREADS=1 \
         --env "TORCHINDUCTOR_CACHE_DIR=$TORCHINDUCTOR_CACHE_DIR" \
         --env TORCHINDUCTOR_FX_GRAPH_CACHE=1,TORCHINDUCTOR_COMPILE_THREADS=1,MPLBACKEND=Agg \
-        "$image" python3 -s scripts/container_python.py "$@"
+        "$image" python3 -s jobs/utils/container_python.py "$@"
 }
 printf 'Checking CPU/CUDA replay gradients and validation before benchmarking.\n'
 # A GPU allocation must exercise the CUDA regression instead of skipping it.
 apptainer exec --nv -e "$image" python3 -s -c \
     'import torch; assert torch.cuda.is_available(), "CUDA is required for this job"; print("CUDA checks on:", torch.cuda.get_device_name(0), flush=True)'
-run_python tests/test_compiled_eskf.py
-run_python tests/test_height_eskf.py
+run_python ekf/tests/test_compiled_eskf.py
+run_python ekf/tests/test_height_eskf.py
 if [[ "${EKF_CHECK_ONLY:-0}" == 1 ]]; then
     printf 'CPU/CUDA replay gradient and validation checks passed.\n'
     exit 0
 fi
 printf 'Measuring replay performance and checking the selected Stage 2 model.\n'
-run_python benchmarks/benchmark_eskf.py --config "$config" --ckpt "$checkpoint" \
+run_python ekf/benchmarks/benchmark_eskf.py --config "$config" --ckpt "$checkpoint" \
     --dataset-config "$dataset" --sensor-metadata-root "$metadata" --output "$run_root"
 runtime="$run_root/runtime.json"
 workers=$(python3 -s -c 'import json,sys; print(json.load(open(sys.argv[1]))["replay_workers"])' "$runtime")

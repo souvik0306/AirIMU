@@ -3,7 +3,7 @@
 # Run from the AirIMU repository without PBS or Apptainer.
 set -e
 
-cd "$(dirname "$0")"
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.."
 VENV_DIR="${VENV_DIR:-}"
 if [[ -z "$VENV_DIR" ]]; then
     if [[ -f .venv311/bin/activate ]]; then
@@ -13,7 +13,7 @@ if [[ -z "$VENV_DIR" ]]; then
     fi
 fi
 if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
-    echo "ERROR: No virtual environment found at $VENV_DIR. Run setup_airimu_ens.sh first, or set VENV_DIR to your environment path." >&2
+    echo "ERROR: No virtual environment found at $VENV_DIR. Run jobs/setup/setup_airimu_ens.sh first, or set VENV_DIR to your environment path." >&2
     exit 1
 fi
 source "$VENV_DIR/bin/activate"

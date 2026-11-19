@@ -17,7 +17,7 @@ from datasets.initial_sensor_bias import resolve_initial_sensor_bias
 from ekf import DifferentiableESKF
 from ekf.data import apply_sensor_metadata, read_dataset_flights
 from ekf.experiment import load_airimu
-from scripts.prepare_stage12_run import flight_map
+from jobs.utils.prepare_stage12_run import flight_map
 
 
 def sha256(path):

@@ -8,13 +8,13 @@
 
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT"
 
 PYTHON_EXPLICIT="${PYTHON_BIN:+1}"
 PYTHON_EXPLICIT="${PYTHON_EXPLICIT:-0}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-VENV_DIR="${VENV_DIR:-$SCRIPT_DIR/.venv}"
+VENV_DIR="${VENV_DIR:-$REPO_ROOT/.venv}"
 SKIP_DOWNLOADS="${SKIP_DOWNLOADS:-0}"
 
 fail() {
@@ -49,16 +49,16 @@ download() {
 ensure_uv() {
     if command -v uv >/dev/null 2>&1; then
         UV_BIN="$(command -v uv)"
-    elif [[ -x "$SCRIPT_DIR/.airimu-tools/uv" ]]; then
-        UV_BIN="$SCRIPT_DIR/.airimu-tools/uv"
+    elif [[ -x "$REPO_ROOT/.airimu-tools/uv" ]]; then
+        UV_BIN="$REPO_ROOT/.airimu-tools/uv"
     else
         echo "Installing uv locally (no root privileges needed)..."
         TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/airimu-setup-XXXXXX")"
         download "https://astral.sh/uv/install.sh" "$TEMP_DIR/install.sh"
-        UV_INSTALL_DIR="$SCRIPT_DIR/.airimu-tools" UV_NO_MODIFY_PATH=1 sh "$TEMP_DIR/install.sh"
+        UV_INSTALL_DIR="$REPO_ROOT/.airimu-tools" UV_NO_MODIFY_PATH=1 sh "$TEMP_DIR/install.sh"
         cleanup
         TEMP_DIR=""
-        UV_BIN="$SCRIPT_DIR/.airimu-tools/uv"
+        UV_BIN="$REPO_ROOT/.airimu-tools/uv"
         [[ -x "$UV_BIN" ]] || fail "uv installation failed."
     fi
 }
@@ -88,7 +88,7 @@ else
     fi
 fi
 
-echo "AirIMU repository: $SCRIPT_DIR"
+echo "AirIMU repository: $REPO_ROOT"
 echo "Virtual environment: $VENV_DIR"
 
 if [[ ! -x "$VENV_DIR/bin/python" ]]; then
@@ -115,14 +115,14 @@ fi
 download_and_extract() {
     local target_dir="$1"
     local url="$2"
-    local destination_root="${3:-$SCRIPT_DIR}"
+    local destination_root="${3:-$REPO_ROOT}"
 
     if [[ -d "$destination_root/$target_dir" ]]; then
         echo "Already present: $target_dir"
         return
     fi
 
-    TEMP_DIR="$(mktemp -d "$SCRIPT_DIR/.airimu-download-XXXXXX")"
+    TEMP_DIR="$(mktemp -d "$REPO_ROOT/.airimu-download-XXXXXX")"
     local archive="$TEMP_DIR/archive.zip"
     echo "Downloading $target_dir..."
     download "$url" "$archive" || fail "Download failed: $url"
@@ -158,23 +158,23 @@ else
     download_and_extract \
         "T-Lab_31st_July_dataset" \
         "https://github.com/souvik0306/AirIMU/releases/download/31st_July_fast_agile/T-Lab_31st_July_dataset.zip" \
-        "$SCRIPT_DIR/data"
+        "$REPO_ROOT/data"
     download_and_extract \
         "T-Lab_28th_July_dataset" \
         "https://github.com/souvik0306/AirIMU/releases/download/28th_july_hover/T-Lab_28th_July_dataset.zip" \
-        "$SCRIPT_DIR/data"
+        "$REPO_ROOT/data"
     download_and_extract \
         "T-Lab_10th_September_dataset" \
         "https://github.com/souvik0306/AirIMU/releases/download/10th_Sept/T-Lab_10th_September_dataset.zip" \
-        "$SCRIPT_DIR/data"
+        "$REPO_ROOT/data"
     download_and_extract \
         "T-Lab_14th_October_dataset" \
         "https://github.com/souvik0306/AirIMU/releases/download/15th_oct/T-Lab_14th_October_dataset.zip" \
-        "$SCRIPT_DIR/data"
+        "$REPO_ROOT/data"
     download_and_extract \
         "T-Lab_15th_October_dataset" \
         "https://github.com/souvik0306/AirIMU/releases/download/15th_oct/T-Lab_15th_October_dataset.zip" \
-        "$SCRIPT_DIR/data"
+        "$REPO_ROOT/data"
     download_and_extract \
         "AirIMU_EuRoC" \
         "https://github.com/Air-IO/Air-IO/releases/download/AirIMU/AirIMU_EuRoC.zip"
@@ -193,7 +193,7 @@ else:
     print("WARNING: CUDA is unavailable; fine-tuning will run on CPU unless PyTorch/CUDA is fixed.")
 PYTHON
 
-if [[ -f "$SCRIPT_DIR/AirIMU_EuRoC/best_model.ckpt" ]]; then
+if [[ -f "$REPO_ROOT/AirIMU_EuRoC/best_model.ckpt" ]]; then
     echo "Pretrained checkpoint: OK"
 elif [[ "$SKIP_DOWNLOADS" != "1" ]]; then
     fail "AirIMU_EuRoC/best_model.ckpt was not found after extraction."
@@ -204,4 +204,4 @@ fi
 echo
 echo "AirIMU setup is complete."
 echo "Activate it with: source \"$VENV_DIR/bin/activate\""
-echo "Run fine-tuning with: ./airimu_finetune.sh all"
+echo "Run fine-tuning with: ./jobs/local/stage12/airimu_finetune.sh"

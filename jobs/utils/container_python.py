@@ -1,7 +1,7 @@
 """Run a script with container packages ahead of optional user dependencies.
 
-Invoke with ``python3 -s scripts/container_python.py SCRIPT [ARGS...]`` or
-``python3 -s scripts/container_python.py -m MODULE [ARGS...]``. Unlike
+Invoke with ``python3 -s jobs/utils/container_python.py SCRIPT [ARGS...]`` or
+``python3 -s jobs/utils/container_python.py -m MODULE [ARGS...]``. Unlike
 site's default ordering, appending user packages cannot replace the container's
 matched PyTorch/Triton installation. Spawned replay workers inherit this path.
 User typing_extensions and protobuf supply compatibility for current W&B when
@@ -18,7 +18,7 @@ from pathlib import Path
 def main():
     if len(sys.argv) < 2:
         raise SystemExit('Usage: container_python.py SCRIPT [ARGS...] | -m MODULE [ARGS...]')
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     user_site = Path(site.getusersitepackages())
     sys.path.append(str(user_site))
     import typing_extensions

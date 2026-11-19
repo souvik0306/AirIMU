@@ -1,12 +1,14 @@
 #PBS -S /bin/bash
 #PBS -q auto_free
 #PBS -j oe
+#PBS -o jobs/logs/ekf/
+#PBS -e jobs/logs/ekf/
 #PBS -N airimu_ekf20_export
 #PBS -l walltime=06:00:00
 #PBS -l select=1:ncpus=8:mem=64gb:ngpus=1
 
-# Prepare the inputs with scripts/prepare_ekf_run.py, then submit:
-# qsub -v EKF_RUN_ROOT=/absolute/path/to/prepared/run airimu_ekf_train_export.pbs
+# Prepare the inputs with ekf/scripts/prepare_ekf_run.py, then submit:
+# qsub -v EKF_RUN_ROOT=/absolute/path/to/prepared/run jobs/pbs/ekf/airimu_ekf_train_export.pbs
 set -euo pipefail
 cd "$PBS_O_WORKDIR"
 module load apptainer/1.4.1
@@ -53,7 +55,7 @@ run_python() {
         --env OMP_NUM_THREADS=1,MKL_NUM_THREADS=1,OPENBLAS_NUM_THREADS=1,MPLBACKEND=Agg \
         --env "TORCHINDUCTOR_CACHE_DIR=$TORCHINDUCTOR_CACHE_DIR" \
         --env TORCHINDUCTOR_FX_GRAPH_CACHE=1,TORCHINDUCTOR_COMPILE_THREADS=1 \
-        "$image" python3 -s -u scripts/container_python.py "$@"
+        "$image" python3 -s -u jobs/utils/container_python.py "$@"
 }
 printf 'Run directory: %s\nCompute node: %s\n' "$run_root" "$(hostname)"
 nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv

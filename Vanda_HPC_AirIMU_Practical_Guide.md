@@ -134,6 +134,8 @@ use this PBS file:
 #PBS -S /bin/bash
 #PBS -q auto_free
 #PBS -j oe
+#PBS -o jobs/logs/stage12/
+#PBS -e jobs/logs/stage12/
 #PBS -N airimu_finetune
 #PBS -l walltime=24:00:00
 #PBS -l select=1:ncpus=36:mem=250gb:ngpus=1
@@ -168,7 +170,7 @@ echo "AirIMU finetuning finished"
 Save this as:
 
 ```text
-airimu_finetune.pbs
+jobs/pbs/stage12/airimu_finetune.pbs
 ```
 
 Important PBS lines:
@@ -220,7 +222,7 @@ cd ~/AirIMU
 Submit:
 
 ```bash
-qsub airimu_finetune.pbs
+qsub jobs/pbs/stage12/airimu_finetune.pbs
 ```
 
 PBS returns a job ID similar to:
@@ -285,10 +287,15 @@ From:
 cd ~/AirIMU
 ```
 
-Watch the newest AirIMU log live:
+Replace `JOB_ID` below with the full ID returned by PBS. New scheduler logs
+are stored under `jobs/logs/`; older moved logs retain their original names.
+For launchers that write an experiment `job.log`, follow that file during
+execution if PBS has not copied its scheduler output back yet.
+
+Watch the selected scheduler log:
 
 ```bash
-tail -f $(ls -t airimu_finetune.o* | head -1)
+tail -f jobs/logs/stage12/JOB_ID.OU
 ```
 
 This shows new output as training runs.
@@ -312,19 +319,19 @@ qstat
 Return to the live log later:
 
 ```bash
-tail -f $(ls -t airimu_finetune.o* | head -1)
+tail -f jobs/logs/stage12/JOB_ID.OU
 ```
 
 Read the final log after the job finishes:
 
 ```bash
-cat $(ls -t airimu_finetune.o* | head -1)
+cat jobs/logs/stage12/JOB_ID.OU
 ```
 
 List AirIMU logs:
 
 ```bash
-ls -ltr airimu_finetune.o*
+ls -ltr jobs/logs/stage12/
 ```
 
 # Section 9. Check the assigned GPU
@@ -446,7 +453,7 @@ git pull
 Submit training:
 
 ```bash
-qsub airimu_finetune.pbs
+qsub jobs/pbs/stage12/airimu_finetune.pbs
 ```
 
 Check the job:
@@ -458,7 +465,7 @@ qstat
 Watch live logs:
 
 ```bash
-tail -f $(ls -t airimu_finetune.o* | head -1)
+tail -f jobs/logs/stage12/JOB_ID.OU
 ```
 
 Stop watching logs with:
@@ -476,7 +483,7 @@ qstat -x
 Read the final log:
 
 ```bash
-cat $(ls -t airimu_finetune.o* | head -1)
+cat jobs/logs/stage12/JOB_ID.OU
 ```
 
 Check the corresponding W&B run for training curves and recorded metrics.
@@ -487,11 +494,11 @@ Check the corresponding W&B run for training curves and recorded metrics.
 ssh e1349884@vanda.nus.edu.sg
 cd ~/AirIMU
 git pull
-qsub airimu_finetune.pbs
+qsub jobs/pbs/stage12/airimu_finetune.pbs
 qstat
 qstat -x
 qstat -fx JOB_ID
-tail -f $(ls -t airimu_finetune.o* | head -1)
+tail -f jobs/logs/stage12/JOB_ID.OU
 qdel JOB_ID
 ```
 

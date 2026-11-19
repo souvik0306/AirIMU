@@ -1,11 +1,13 @@
 #PBS -S /bin/bash
 #PBS -q auto_free
 #PBS -j oe
+#PBS -o jobs/logs/stage12/
+#PBS -e jobs/logs/stage12/
 #PBS -N airimu_stage12_export
 #PBS -l walltime=24:00:00
 #PBS -l select=1:ncpus=12:mem=96gb:ngpus=1
 
-# Submit with: qsub airimu_stage12_export.pbs
+# Submit with: qsub jobs/pbs/stage12/airimu_stage12_export.pbs
 # Runs scratch Stage 1, Stage 2 with fixed initial bias subtraction,
 # inference, evaluation, and ONNX export. Stage controls allow Stage 1 to run
 # while new-flight bias tables are being supplied: STOP_AFTER=stage1, then
@@ -33,14 +35,14 @@ export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 MPLBACKEND=Agg
 run_python() {
     apptainer exec --nv -e --env PYTHONNOUSERSITE=1 \
         --env OMP_NUM_THREADS=4,MKL_NUM_THREADS=4,OPENBLAS_NUM_THREADS=4,MPLBACKEND=Agg \
-        "$image" python3 -s -u scripts/container_python.py "$@"
+        "$image" python3 -s -u jobs/utils/container_python.py "$@"
 }
 prepare_stage=all
 if [[ "$start_stage" == stage2 ]]; then prepare_stage=stage2; fi
 if [[ "$stop_after" == stage1 ]]; then prepare_stage=stage1; fi
 bias_args=()
 if [[ -n "${SENSOR_BIAS_ROOT:-}" ]]; then bias_args=(--sensor-bias-root "$SENSOR_BIAS_ROOT"); fi
-run_python scripts/prepare_stage12_run.py --stage1-config "$stage1_config" \
+run_python jobs/utils/prepare_stage12_run.py --stage1-config "$stage1_config" \
     --stage2-config "$stage2_config" --dataset-config "$dataset_config" \
     --output "$run_root/configs" --stage "$prepare_stage" "${bias_args[@]}"
 stage1_config="$run_root/configs/stage1.conf"
