@@ -30,7 +30,16 @@ checkpoint=${AIRIMU_CKPT:?Set AIRIMU_CKPT to the Stage 2 checkpoint}
 dataset_config=${EKF_DATASET_CONFIG:-configs/datasets/TLab/tlab_body.conf}
 sensor_metadata_root=${SENSOR_METADATA_ROOT:-initial_sensor_biases}
 epochs=${EKF_EPOCHS:-30}
-learning_rate=${EKF_LR:-1e-4}
+learning_rate=${EKF_LR:-1e-5}
+training_options=(--configuration "${EKF_CONFIGURATION:-B}"
+                  --gyro-weight "${EKF_GYRO_WEIGHT:-1e-4}"
+                  --smoothness-weight "${EKF_SMOOTHNESS_WEIGHT:-0}"
+                  --gru2-lr "${EKF_GRU2_LR:-1e-6}"
+                  --gru1-lr "${EKF_GRU1_LR:-5e-7}")
+if [[ "${EKF_CONFIGURATION:-B}" == "C" ]]; then
+    training_options+=(--configuration-c-evidence "${EKF_A_RUN:?Set EKF_A_RUN}" "${EKF_B_RUN:?Set EKF_B_RUN}")
+fi
+evaluation_split=${EKF_EVALUATION_SPLIT:-validation}
 cpu_threads=${EKF_CPU_THREADS:-1}
 replay_workers=${EKF_REPLAY_WORKERS:-4}
 flight_batch_size=${EKF_FLIGHT_BATCH_SIZE:-$((replay_workers > 0 ? replay_workers : 1))}
@@ -88,32 +97,33 @@ python3 -u train_eskf.py \
 --replay-workers "$replay_workers" \
 --replay-backend "$replay_backend" \
 --flight-batch-size "$flight_batch_size" \
---feature-cache-mb "$feature_cache_mb"
+--feature-cache-mb "$feature_cache_mb" \
+"${training_options[@]}"
 
 if [[ ! -f "$training_output/best_model.ckpt" ]]; then
     echo "ERROR: ESKF training completed without best_model.ckpt" >&2
     exit 3
 fi
 
-echo "Training finished. Evaluating learned covariance on the test split."
+echo "Training finished. Evaluating learned covariance on the $evaluation_split split."
 python3 -u -m evaluation.evaluate_eskf \
 --config "$config" \
 --ckpt "$training_output/best_model.ckpt" \
 --dataset-config "$dataset_config" \
 --sensor-metadata-root "$sensor_metadata_root" \
 --output "$learned_evaluation" \
---split test \
+--split "$evaluation_split" \
 --device "$device" \
 --ekf-device "$ekf_device" \
 --cpu-threads "$cpu_threads"
 
 if [[ "$run_fixed_baseline" == "1" ]]; then
-    echo "Evaluating the fixed-noise EKF baseline on the same test split."
+    echo "Evaluating the fixed-noise EKF baseline on the same $evaluation_split split."
         python3 -u -m evaluation.evaluate_eskf \
     --dataset-config "$dataset_config" \
     --sensor-metadata-root "$sensor_metadata_root" \
     --output "$fixed_evaluation" \
-    --split test \
+    --split "$evaluation_split" \
     --device "$device" \
     --ekf-device "$ekf_device" \
     --cpu-threads "$cpu_threads"

@@ -54,9 +54,16 @@ def custom_collate(data):
             {'pos': init_pos, 'vel': init_vel, 'rot': init_rot,}, \
             {'gt_pos': gt_pos, 'gt_vel': gt_vel, 'gt_rot': gt_rot, }
 
-def padding_collate(data, pad_len = 1, use_gravity = True, verbose = False):
+def padding_collate(data, pad_len = 1, use_gravity = True, verbose = False, raw_padding=False):
     B = len(data)
     input_data, init_state, label = custom_collate(data)
+    if raw_padding:
+        # Context is derived exclusively from measured IMU. Ground-truth
+        # attitude remains available to the integrator's initial state only.
+        for name in ('acc', 'gyro'):
+            values = input_data[name]
+            input_data[name] = torch.cat((values[:, :1].expand(-1, pad_len, -1), values), dim=1)
+        return input_data, init_state, label
 
     original_length = input_data['acc'].shape[1]
 
@@ -132,6 +139,7 @@ collate_fcs ={
     "base": custom_collate,
     "padding": padding_collate,
     "padding9": lambda data: padding_collate(data, pad_len = 9),
+    "padding9_raw": lambda data: padding_collate(data, pad_len=9, raw_padding=True),
     "padding1": lambda data: padding_collate(data, pad_len = 1),
     "Gpadding": lambda data: padding_collate(data, pad_len = 9, use_gravity = False),
 }

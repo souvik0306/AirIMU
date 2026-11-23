@@ -2,27 +2,24 @@ import torch
 
 
 class OutputMetrics:
-    """Accumulate only x/y population std of predicted sensor noise std."""
+    """Sample-weighted mean sqrt(variance), per sensor and x/y/z axis."""
 
     def __init__(self):
         self.states = {}
 
     @torch.no_grad()
     def _update(self, name, value):
-        samples = value.detach().reshape(-1, 3)[:, :2].double().sqrt()
+        samples = value.detach().reshape(-1, 3).double().sqrt()
         count = samples.shape[0]
         if count == 0:
             return
-        variance, mean = torch.var_mean(samples, dim=0, unbiased=False)
-        m2 = variance * count
+        mean = samples.mean(dim=0)
         if name in self.states:
-            old_count, old_mean, old_m2 = self.states[name]
+            old_count, old_mean = self.states[name]
             total = old_count + count
-            delta = mean - old_mean
-            m2 = old_m2 + m2 + delta.square() * (old_count * count / total)
-            mean = old_mean + delta * (count / total)
+            mean = old_mean + (mean - old_mean) * (count / total)
             count = total
-        self.states[name] = count, mean, m2
+        self.states[name] = count, mean
 
     @torch.no_grad()
     def update(self, outputs):
@@ -33,10 +30,9 @@ class OutputMetrics:
 
     @torch.no_grad()
     def summarize(self):
-        """Return the four noise-spread series for the shared metric reporter."""
+        """Return six noise-level series; sqrt is applied before averaging."""
         metrics = {}
-        for name, (count, _, m2) in self.states.items():
-            values = (m2 / count).clamp_min(0).sqrt().cpu().tolist()
-            for axis, scalar in zip('xy', values):
-                metrics[f'outputs/{name}/std/{axis}'] = scalar
+        for name, (_, mean) in self.states.items():
+            for axis, scalar in zip('xyz', mean.cpu().tolist()):
+                metrics[f'outputs/{name}/mean/{axis}'] = scalar
         return metrics

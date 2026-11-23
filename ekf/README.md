@@ -36,3 +36,7 @@ The public training and evaluation entry points remain `train_eskf.py` and
 entry points. See the [integration guide](../doc/differentiable_eskf.md) for filter
 behavior and the [performance document](../doc/ekf_training_performance.md) for
 timing evidence.
+
+See [training experiments](../doc/training_improvements.md) for gyro calibration,
+A/B/C GRU training, the Stage 2 raw covariance adapter, temporal regularization,
+validation comparisons and diagnostics.

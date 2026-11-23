@@ -1,4 +1,4 @@
-"""Freeze and validate a completed Stage 2 run before EKF job submission."""
+"""Freeze and validate an AirIMU checkpoint before EKF job submission."""
 
 import argparse
 from collections import Counter
@@ -27,6 +27,8 @@ def sha256(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage2-run", required=True)
+    parser.add_argument("--checkpoint", help="Explicit source checkpoint; otherwise use stage2/ckpt/best_model.ckpt")
+    parser.add_argument("--source-stage", choices=("stage1", "stage2"), default="stage2")
     parser.add_argument("--output", required=True)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-5)
@@ -36,7 +38,7 @@ def main():
     source = Path(args.stage2_run).resolve()
     if (source / "scratch").is_dir():
         source = source / "scratch"
-    checkpoint = source / "stage2/ckpt/best_model.ckpt"
+    checkpoint = Path(args.checkpoint).resolve() if args.checkpoint else source / "stage2/ckpt/best_model.ckpt"
     config_path = source / "configs/stage2.conf"
     dataset_path = source / "configs/dataset.conf"
     for path in (checkpoint, config_path, dataset_path):
@@ -94,7 +96,7 @@ def main():
     frozen_dataset = configs / "dataset.conf"
     frozen_config.write_text(HOCONConverter.to_json(conf) + "\n")
     frozen_dataset.write_text(HOCONConverter.to_json(dataset) + "\n")
-    frozen_checkpoint = inputs / "stage2_best_model.ckpt"
+    frozen_checkpoint = inputs / ("initial_airimu.ckpt" if args.source_stage == "stage1" else "stage2_best_model.ckpt")
     shutil.copy2(checkpoint, frozen_checkpoint)
     for path in (frozen_config, frozen_dataset, frozen_checkpoint):
         files[str(path.relative_to(output))] = sha256(path)
@@ -127,6 +129,9 @@ def main():
     plan = {
         "created_sgt": datetime.now(ZoneInfo("Asia/Singapore")).isoformat(),
         "source_stage2_run": str(source), "source_stage2_checkpoint": str(checkpoint),
+        "source_initialization_stage": args.source_stage,
+        "source_checkpoint": str(checkpoint),
+        "requested_checkpoint_path": str(Path(args.checkpoint).absolute()) if args.checkpoint else str(checkpoint),
         "source_checkpoint_epoch": state.get("epoch"),
         "initial_checkpoint": str(frozen_checkpoint), "input_sha256": files,
         "run_root": str(output), "config": str(frozen_config),

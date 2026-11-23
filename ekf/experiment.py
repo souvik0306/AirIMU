@@ -1,10 +1,21 @@
 """Shared experiment setup for full-flight ESKF training and evaluation."""
 
 import math
+import json
+import hashlib
+from pathlib import Path
 
 import torch
 
 from .training import AirIMUESKF, horizontal_velocity_residual
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1024**2), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def filter_metadata(ekf):
@@ -17,6 +28,28 @@ def filter_metadata(ekf):
             "height_measurement_std": math.sqrt(float(ekf.height_R[0, 0])),
             "post_cutoff_observation_types": ["height"] if ekf.height_updates else [],
             "post_cutoff_covariance_propagation": True}
+
+
+def validate_gru1_evidence(a_run, b_run):
+    """C is an explicit subsequent experiment, only after matched B beats A."""
+    runs = [Path(a_run), Path(b_run)]
+    metadata = [json.loads((run / "eskf_metadata.json").read_text()) for run in runs]
+    if [record.get("configuration") for record in metadata] != ["A", "B"]:
+        raise ValueError("C evidence must contain A and B experiments in that order.")
+    for key in ("initial_checkpoint", "initial_checkpoint_sha256", "config", "flights", "seed", "loss_options", "height_updates",
+                "covariance_policy", "flight_batch_size", "gradient_clip", "correction_weight",
+                'gyro_reference_quality_policy'):
+        if metadata[0].get(key) != metadata[1].get(key):
+            raise ValueError(f"A/B validation evidence differs in {key}.")
+    best = []
+    for run in runs:
+        metrics = [json.loads(line)["validation_xy_mse"] for line in (run / "metrics.jsonl").read_text().splitlines()]
+        if not metrics or not all(math.isfinite(value) for value in metrics):
+            raise ValueError("C evidence requires finite validation metrics.")
+        best.append(min(metrics))
+    if best[1] >= best[0]:
+        raise ValueError("Enable C only when B improves validation velocity MSE over A.")
+    return best
 
 
 def covariance_statistics(variance):
@@ -53,10 +86,11 @@ class CovarianceStatistics:
                    for name, target in self.total.items()}}
 
 
-def load_airimu(config_path, checkpoint_path, ekf, device):
+def load_airimu(config_path, checkpoint_path, ekf, device, *, configuration="A", initialize_adapter=False):
     # Keep the filter itself independent of PyPose, HOCON, and the dataset code.
     from pyhocon import ConfigFactory
     from model import net_dict
+    from model.checkpoints import load_covariance_checkpoint, validate_covariance_policy
 
     conf = ConfigFactory.parse_file(str(config_path))
     conf.train["propcov"] = True
@@ -66,15 +100,19 @@ def load_airimu(config_path, checkpoint_path, ekf, device):
         raise ValueError("Covariance-only ESKF training supports CodeNet/CodePoseNet.")
     network = net_dict[network_name](conf.train).to(device)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    network.load_state_dict(checkpoint.get("model_state_dict", checkpoint), strict=True)
-    return AirIMUESKF(network, ekf)
+    validate_covariance_policy(network, checkpoint.get("covariance_policy"))
+    load_covariance_checkpoint(network, checkpoint.get("model_state_dict", checkpoint),
+                               initialize_adapter=initialize_adapter)
+    return AirIMUESKF(network, ekf, configuration=configuration)
 
 
 def save_checkpoint(path, wrapper, optimizer, epoch, validation_mse, metadata):
     """Compatible AirIMU network weights plus optimizer and experiment provenance."""
+    from model.checkpoints import covariance_policy
     torch.save({"model_state_dict": wrapper.network.state_dict(),
+                "covariance_policy": covariance_policy(wrapper.network),
                 "optimizer_state_dict": optimizer.state_dict(), "epoch": epoch,
-                "best_loss": validation_mse, "objective": "eskf_horizontal_velocity_mse",
+                "best_loss": validation_mse, "objective": metadata.get("optimizer_objective", "eskf_horizontal_velocity_mse"),
                 "ekf_metadata": metadata}, path)
 
 

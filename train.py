@@ -32,8 +32,8 @@ WANDB_PHASE_METRIC_KEYS = frozenset({
     *STAGE2_CALIBRATION_KEYS,
     # Stage 1 uses these names for corrected-trajectory calibration.
     'corrected_vel_nees', 'corrected_vel_1sigma', 'corrected_vel_2sigma',
-    *(f'outputs/{sensor}_noise_std/std/{axis}'
-      for sensor in ('gyro', 'acc') for axis in 'xy'),
+    *(f'outputs/{sensor}_noise_std/mean/{axis}'
+      for sensor in ('gyro', 'acc') for axis in 'xyz'),
 })
 
 
@@ -104,6 +104,9 @@ class _LossMetrics:
 def train(network, loader, confs, epoch, optimizer):
     """Train for one epoch, transferring scalar metrics only when reporting."""
     network.train()
+    if confs.get('raw_cov_adapter', False) and confs.get('stage', 1) == 2:
+        for name in ('cnn', 'gru1', 'gru2', 'accdecoder', 'gyrodecoder'):
+            getattr(network, name).eval()
     if confs.get('stage', 1) == 2:
         uncertainty_keys = (
             'raw_vel_rmse', 'rot_nll', 'vel_nll', 'cov_nll',
@@ -152,6 +155,11 @@ def train(network, loader, confs, epoch, optimizer):
                     loss_state['loss_covariance'], encoder_parameters,
                 )
             loss_state['loss'].backward()
+            if confs.get('raw_cov_adapter', False):
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in network.parameters() if p.requires_grad],
+                    confs.get('gradient_clip', 1.), error_if_nonfinite=True,
+                )
             optimizer.step()
 
             if should_report:
@@ -323,6 +331,9 @@ def save_best_ckpt(
         'metric_name': metric_name,
         'metric_value': test_loss,
     }
+    if hasattr(network, 'acc_cov_min'):
+        from model.checkpoints import covariance_policy
+        checkpoint['covariance_policy'] = covariance_policy(network)
     if extra_state:
         checkpoint.update(extra_state)
     torch.save(checkpoint, best_ckpt_path)
@@ -345,6 +356,9 @@ def save_ckpt(
         'scheduler_state_dict': scheduler.state_dict(),
         'best_loss': test_loss,
     }
+    if hasattr(network, 'acc_cov_min'):
+        from model.checkpoints import covariance_policy
+        checkpoint['covariance_policy'] = covariance_policy(network)
     if extra_state:
         checkpoint.update(extra_state)
 

@@ -18,9 +18,17 @@ AirIMU_EuRoC/*
 .venv/*
 /tests/*
 !/tests/test_october_sensor_bias.py
+!/tests/test_covariance_output.py
 
 /data/
 /jobs/logs/**/*
 !/jobs/logs/**/
 !/jobs/logs/**/.gitkeep
 doc/differentiable_eskf.md
+*.json
+*.jsonl
+*.pbs
+*.sh
+tests/*
+doc/ekf_training_performance.md
+doc/training_improvements.md

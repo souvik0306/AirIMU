@@ -13,6 +13,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from datasets import SeqeuncesDataset, collate_fcs
 from datasets.initial_sensor_bias import resolve_initial_sensor_bias
 from model import net_dict
+from model.checkpoints import load_covariance_checkpoint, configure_stage2_parameters, validate_covariance_policy
 from utils import move_to
 from train import (
     train,
@@ -45,9 +46,17 @@ def load_pretrained_model(network, ckpt_path, device, strict=True):
 
     checkpoint = torch_load(ckpt_path, device)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
-    load_result = network.load_state_dict(state_dict, strict=strict)
+    if network.conf.get("raw_cov_adapter", False):
+        validate_covariance_policy(network, checkpoint.get("covariance_policy"))
+        has_adapter = any(name.startswith("raw_cov_adapter.") for name in state_dict)
+        if not has_adapter and checkpoint.get("epoch", 8) < 8:
+            raise ValueError("Adapter initialization requires Stage 1 covariance training (epoch >= 9).")
+        load_covariance_checkpoint(network, state_dict, initialize_adapter=not has_adapter)
+        load_result = None
+    else:
+        load_result = network.load_state_dict(state_dict, strict=strict)
     print(f"loaded pretrained model weights from {ckpt_path}")
-    if not strict:
+    if not strict and load_result is not None:
         print(f"missing keys: {load_result.missing_keys}")
         print(f"unexpected keys: {load_result.unexpected_keys}")
     return True
@@ -338,7 +347,9 @@ if __name__ == "__main__":
 
     train_dataset = SeqeuncesDataset(data_set_config=conf.dataset.train)
     test_dataset = SeqeuncesDataset(data_set_config=conf.dataset.test)
-    eval_dataset = SeqeuncesDataset(data_set_config=conf.dataset.eval)
+    # dataset.test is validation; dataset.eval is the held-out final test set.
+    # Full-window validation metrics must use the same validation flights.
+    eval_dataset = SeqeuncesDataset(data_set_config=conf.dataset.test, mode="evaluate")
 
     if 'collate' in conf.dataset.keys():
         collate_fn_train = collate_fcs[conf.dataset.collate]
@@ -370,7 +381,7 @@ if __name__ == "__main__":
     )
     eval_loader = build_loader(
         eval_dataset, conf.train.batch_size, False, collate_fn_test,
-        drop_last=True, **loader_options,
+        drop_last=False, **loader_options,
     )
 
     os.makedirs(os.path.join(conf.general.exp_dir, "ckpt"), exist_ok=True)
@@ -395,8 +406,9 @@ if __name__ == "__main__":
         device=args.device, dtype=train_dataset.get_dtype()
     )
     base_cov_weight = float(conf.train.get("cov_weight", 0.0))
+    parameter_groups = configure_stage2_parameters(network, conf.train) if is_stage2 else network.parameters()
     optimizer = torch.optim.Adam(
-        network.parameters(), lr=conf.train.lr, weight_decay=conf.train.weight_decay
+        parameter_groups, lr=conf.train.lr, weight_decay=conf.train.weight_decay
     )
     scheduler = ReduceLROnPlateau(
         optimizer,
@@ -449,9 +461,9 @@ if __name__ == "__main__":
                 args.device,
                 strict=not args.non_strict_pretrained,
             )
-            if is_stage2:
-                # The pretrained cov heads are dead weight from a propcov=False
-                # stage; re-seed them at the target instead of keeping those stale values.
+            if is_stage2 and not conf.train.get("raw_cov_adapter", False):
+                # Randomly initialize Stage 2 covariance heads rather than
+                # keeping the heads loaded from Stage 1.
                 network.reset_cov_heads()
     else:
         pretrained_ckpt = args.pretrained_ckpt
@@ -463,8 +475,11 @@ if __name__ == "__main__":
             args.device,
             strict=not args.non_strict_pretrained,
         )
-        if is_stage2:
+        if is_stage2 and not conf.train.get("raw_cov_adapter", False):
             network.reset_cov_heads()
+
+    if is_stage2 and conf.train.get("raw_cov_adapter", False) and not (pretrained_loaded or resumed):
+        raise ValueError("Adapter training requires a validated Stage 1 checkpoint.")
 
     if not is_stage2:
         if pretrained_loaded and not resumed:

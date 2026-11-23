@@ -185,7 +185,7 @@ def aligned_observations(ekf, flight):
     return torch.stack(observations)
 
 
-def velocity_sequence(ekf, flight, variance):
+def velocity_sequence(ekf, flight, variance, *, return_gyro_bias=False):
     """Exact full-history velocity replay, with one compiled call per sample."""
     aided, predict, height, aided_height = kernels()
     device = ekf.gravity.device
@@ -212,6 +212,7 @@ def velocity_sequence(ekf, flight, variance):
         x = x.detach().requires_grad_(True)
         P = P.detach().requires_grad_(True)
     velocities = [x[3:6]]
+    gyro_biases = [x[13:16].detach()] if return_gyro_bias else None
     valid = []
     cutoff = flight['cutoff_timestamp']
     schedule = times.tolist()
@@ -234,6 +235,8 @@ def velocity_sequence(ekf, flight, variance):
             x, P = predict(x, P, acc_rows[i], gyro_rows[i], variance_rows[i], dt[i],
                            ekf.gravity, ekf.bias_noise_density)
         velocities.append(x[3:6])
+        if return_gyro_bias:
+            gyro_biases.append(x[13:16].detach())
     if valid:
         validity = torch.stack(valid).all(0).tolist()
         if not validity[0]:
@@ -243,4 +246,4 @@ def velocity_sequence(ekf, flight, variance):
     result = torch.stack(velocities)
     if not bool(torch.isfinite(result).all()):
         raise ValueError('ESKF replay produced non-finite velocities.')
-    return result
+    return (result, torch.stack(gyro_biases)) if return_gyro_bias else result

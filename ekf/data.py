@@ -197,7 +197,7 @@ def read_dataset_flights(path):
     return flights
 
 
-def prepare_flight(record, cutoff_timestamp, ekf):
+def prepare_flight(record, cutoff_timestamp, ekf, *, full_sequence=False):
     """Initialize and replay the standard aligned TLab IMU/Vicon files.
 
     data.csv: time,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,
@@ -213,8 +213,9 @@ def prepare_flight(record, cutoff_timestamp, ekf):
     if not bool((imu_time[1:] > imu_time[:-1]).all()):
         raise ValueError("TLab timestamps must be strictly increasing.")
     start = float(record.get("start_timestamp", imu[0, 0]))
-    end = float(cutoff_timestamp) + 25.
-    if start >= cutoff_timestamp or float(imu[-1, 0]) < end:
+    evaluation_end = float(cutoff_timestamp) + 25.
+    end = float(imu[-1, 0]) if full_sequence else evaluation_end
+    if start >= cutoff_timestamp or float(imu[-1, 0]) < evaluation_end:
         raise ValueError("Flight requires an aided start and IMU coverage through cutoff+25.")
     selected_mask = (imu[:, 0] >= start) & (imu[:, 0] <= end)
     selected = imu[selected_mask]
@@ -265,9 +266,20 @@ def prepare_flight(record, cutoff_timestamp, ekf):
     gt_velocity = selected_vicon[:, 4:7]
     if terminal_velocity is not None:
         gt_velocity = torch.cat((gt_velocity, terminal_velocity[None]))
+    # Supervision uses the already aligned orientation; never fed to AirIMU.
+    gt_quaternion = selected_vicon[:, 7:11]
+    gt_time = selected_vicon[:, 0]
+    if terminal_velocity is not None:
+        # Preserve the next actual orientation timestamp as interpolation
+        # support for the synthetic terminal IMU output. This also handles
+        # sub-sample Vicon/IMU offsets without duplicate orientation times.
+        next_row = int(torch.searchsorted(imu_time, imu_time.new_tensor(end)))
+        gt_quaternion = torch.cat((gt_quaternion, vicon[next_row:next_row+1, 7:11]))
+        gt_time = torch.cat((gt_time, vicon[next_row:next_row+1, 0]))
     return dict(raw_acceleration=selected[:, 1:4].to(ekf.gravity.device),
                 raw_gyroscope=selected[:, 4:7].to(ekf.gravity.device),
                 imu_time=times.to(ekf.gravity.device), vicon_events=events,
                 cutoff_timestamp=float(cutoff_timestamp), initial_state=state,
                 initial_covariance=covariance,
-                vicon_velocity_gt=gt_velocity.to(ekf.gravity.device))
+                vicon_velocity_gt=gt_velocity.to(ekf.gravity.device),
+                vicon_quaternion_gt=gt_quaternion, vicon_time_gt=gt_time)

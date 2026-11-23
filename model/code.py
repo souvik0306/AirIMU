@@ -24,12 +24,14 @@ def _print_output_summary(name, value, variance=False):
 
     samples = value.reshape(-1, value.shape[-1])
     print(f"   - {name} statistics (all batch/time samples; axes x, y, z):")
-    for label, stat in (
+    statistics = [
         ("mean", samples.mean(dim=0)),
-        ("std", samples.std(dim=0, unbiased=False)),
         ("min", samples.amin(dim=0)),
         ("max", samples.amax(dim=0)),
-    ):
+    ]
+    if not variance:
+        statistics.insert(1, ("std", samples.std(dim=0, unbiased=False)))
+    for label, stat in statistics:
         print(f"     {label} = {stat.tolist()}")
     if variance:
         print(f"     mean predicted noise std (sqrt(variance)) = {samples.sqrt().mean(dim=0).tolist()}")
@@ -54,7 +56,7 @@ class CodeNet(ModelBase):
 
         # use_cov_limits defaults to True, with optional per-sensor ceilings.
         # When False, scaled softplus keeps variance positive without a ceiling;
-        # cov_target then sets initialization and scale only.
+        # cov_target supplies the output scale only.
         # Non-persistent: these are config-derived constants, not learned
         # state, so they must never appear in / be restored from a checkpoint
         # (older checkpoints predate these keys and would fail a strict load).
@@ -106,32 +108,23 @@ class CodeNet(ModelBase):
         nn.init.zeros_(self.gyro_bias_gain.weight)
 
         self.reset_cov_heads()
+        # Optional Stage 2 residual-to-raw adaptation. A zero final layer
+        # preserves every Stage 1 covariance prediction at initialization.
+        self.raw_cov_adapter = None
+        if conf.get("raw_cov_adapter", False):
+            if self.use_cov_limits:
+                raise ValueError("The raw covariance adapter requires use_cov_limits=False.")
+            self.raw_cov_adapter = nn.Sequential(nn.Linear(256 + 6 + 6, 32), nn.GELU(), nn.Linear(32, 6))
+            nn.init.zeros_(self.raw_cov_adapter[-1].weight)
+            nn.init.zeros_(self.raw_cov_adapter[-1].bias)
 
     def reset_cov_heads(self):
-        """(Re-)seed the covariance heads at the desired target,
-        so training has to justify raising uncertainty
-        above it. Must be called again after loading a pretrained checkpoint:
-        those heads are dead weight carried over from a propcov=False stage
-        and would otherwise silently overwrite this initialization.
-        """
-        if not self.use_cov_limits:
-            # softplus(0) / log(2) == 1, so both heads start at cov_target.
-            for decoder in (self.acccov_decoder, self.gyrocov_decoder):
-                nn.init.zeros_(decoder[-1].weight)
-                nn.init.zeros_(decoder[-1].bias)
-            return
-        conf = self.conf
-        acc_default_fraction = (self.acc_cov_target - self.acc_cov_min) / (self.acc_cov_max - self.acc_cov_min)
-        gyro_default_fraction = (self.gyro_cov_target - self.gyro_cov_min) / (self.gyro_cov_max - self.gyro_cov_min)
-        acc_init_fraction = conf.get("acc_cov_init_fraction", conf.get("cov_init_fraction", acc_default_fraction))
-        gyro_init_fraction = conf.get("gyro_cov_init_fraction", conf.get("cov_init_fraction", gyro_default_fraction))
-        for decoder, init_fraction in (
-            (self.acccov_decoder, acc_init_fraction),
-            (self.gyrocov_decoder, gyro_init_fraction),
-        ):
-            last_linear = decoder[-1]
-            nn.init.zeros_(last_linear.weight)
-            nn.init.constant_(last_linear.bias, math.log(float(init_fraction) / (1 - float(init_fraction))))
+        """Initialize fresh heads for Stage 1 or the explicit Stage 2 reset baseline."""
+        for decoder in (self.acccov_decoder, self.gyrocov_decoder):
+            for layer in decoder:
+                if isinstance(layer, nn.Linear):
+                    layer.reset_parameters()
+        print('Covariance head initialization: random Linear parameters; no forced target outputs.', flush=True)
 
     def encoder(self, x):
         x = self.cnn(x.transpose(-1,-2)).transpose(-1,-2)
@@ -140,7 +133,7 @@ class CodeNet(ModelBase):
 
         return x
 
-    def cov_decoder(self, x, correction):
+    def cov_decoder(self, x, correction, *, return_adapter_delta=False):
         # correction is detached: it only informs the covariance heads of the
         # estimated bias magnitude, it must not let the covariance loss steer
         # the correction network (that is the state loss's job alone).
@@ -155,7 +148,19 @@ class CodeNet(ModelBase):
             acc = self.acc_cov_min + (self.acc_cov_max - self.acc_cov_min) * torch.sigmoid(acc_logit)
             gyro = self.gyro_cov_min + (self.gyro_cov_max - self.gyro_cov_min) * torch.sigmoid(gyro_logit)
 
-        return torch.cat([acc, gyro], dim = -1)
+        stage1 = torch.cat([acc, gyro], dim=-1)
+        if self.raw_cov_adapter is None:
+            if return_adapter_delta:
+                raise ValueError("Adapter adjustments requested without an adapter.")
+            return stage1
+        log_stage1 = stage1.log()
+        delta = self.raw_cov_adapter(torch.cat((x, log_stage1, correction), dim=-1))
+        floor = torch.cat((self.acc_cov_min.expand(3), self.gyro_cov_min.expand(3)))
+        # Only a numerical floor; no upper clipping or covariance target.
+        # Multiplication makes the zero-output adapter exactly identical to
+        # its frozen parent (log/exp round trips do not preserve every bit).
+        adapted = (stage1 * delta.exp()).clamp_min(floor)
+        return (adapted, delta) if return_adapter_delta else adapted
 
     def decoder(self, x):
         acc = self.accdecoder(x) * self.acc_std

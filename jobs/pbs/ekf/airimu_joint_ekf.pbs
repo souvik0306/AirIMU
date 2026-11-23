@@ -26,6 +26,14 @@ dataset_config=${EKF_DATASET_CONFIG:-configs/datasets/TLab/tlab_body.conf}
 sensor_metadata_root=${SENSOR_METADATA_ROOT:-initial_sensor_biases}
 ekf_epochs=${EKF_EPOCHS:-30}
 ekf_learning_rate=${EKF_LR:-1e-5}
+training_options=(--configuration "${EKF_CONFIGURATION:-B}"
+                  --gyro-weight "${EKF_GYRO_WEIGHT:-1e-4}"
+                  --smoothness-weight "${EKF_SMOOTHNESS_WEIGHT:-0}"
+                  --gru2-lr "${EKF_GRU2_LR:-1e-6}"
+                  --gru1-lr "${EKF_GRU1_LR:-5e-7}")
+if [[ "${EKF_CONFIGURATION:-B}" == "C" ]]; then
+    training_options+=(--configuration-c-evidence "${EKF_A_RUN:?Set EKF_A_RUN}" "${EKF_B_RUN:?Set EKF_B_RUN}")
+fi
 cpu_threads=${EKF_CPU_THREADS:-1}
 replay_workers=${EKF_REPLAY_WORKERS:-4}
 flight_batch_size=${EKF_FLIGHT_BATCH_SIZE:-$((replay_workers > 0 ? replay_workers : 1))}
@@ -137,7 +145,8 @@ python3 -s -u jobs/utils/container_python.py train_eskf.py \
 --replay-workers "$replay_workers" \
 --replay-backend "$replay_backend" \
 --flight-batch-size "$flight_batch_size" \
---feature-cache-mb "$feature_cache_mb"
+--feature-cache-mb "$feature_cache_mb" \
+"${training_options[@]}"
 
 if [[ ! -f "$ekf_training_output/best_model.ckpt" ]]; then
     echo "ERROR: ESKF training completed without best_model.ckpt" >&2

@@ -292,9 +292,9 @@ not include those additions, and the completed 20-epoch model predates them.
 The completed benchmark's source evidence is available here:
 
 - [PBS output](../jobs/logs/ekf/airimu_ekf_bench.o1586065).
-- [Replay benchmark and gradient comparison](../experiments/20261118_215734_SGT_job1586065_ekf_benchmark/replay_benchmark.json).
-- [Epoch metrics](../experiments/20261118_215734_SGT_job1586065_ekf_benchmark/training/metrics.jsonl).
-- [Checkpoint, runtime and flight provenance](../experiments/20261118_215734_SGT_job1586065_ekf_benchmark/training/eskf_metadata.json).
+- [Replay benchmark and gradient comparison](benchmarks/20261123_cleanup/20261118_215734_SGT_job1586065_ekf_benchmark/replay_benchmark.json).
+- [Epoch metrics](benchmarks/20261123_cleanup/20261118_215734_SGT_job1586065_ekf_benchmark/training/metrics.jsonl).
+- [Archived runtime and flight provenance](benchmarks/20261123_cleanup/20261118_215734_SGT_job1586065_ekf_benchmark/training/eskf_metadata.json).
 - [Earlier run's epoch metrics](../experiments/20261115_234250_SGT_job1559873/joint_ekf/ekf_training/metrics.jsonl).
 
 In the validated container environment, the main runtime settings are:
